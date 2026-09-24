@@ -1,4 +1,5 @@
-@.str.0 = private unnamed_addr constant [5 x i8] c"hero\00"
+@.str.0 = private unnamed_addr constant [5 x i8] c"init\00"
+@.str.1 = private unnamed_addr constant [2 x i8] c"s\00"
 declare ptr @glm_tbl_new(i64, i8)
 declare void @glm_tbl_get(ptr, i64, ptr)
 declare void @glm_tbl_set(ptr, i64, ptr)
@@ -13,13 +14,13 @@ define i32 @main() {
 entry:
   %ts0.valp = alloca i64
   %ts1.valp = alloca i64
-  %ts2.dst = alloca i64
+  %ts2.valp = alloca i64
   %ts3.dst = alloca i64
   br label %b0
 
 b0:
   %v1 = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
-  %v2 = add i64 0, 0
+  %v2 = add i64 0, 10
   %v0 = call ptr @glm_tbl_new(i64 8, i8 0)
   %v3 = add i64 0, 0
   %ts0.cast = ptrtoint ptr %v1 to i64
@@ -28,16 +29,16 @@ store i64 %ts0.cast, ptr %ts0.valp
   %v4 = add i64 0, 1
   store i64 %v2, ptr %ts1.valp
   call void @glm_tbl_set(ptr %v0, i64 %v4, ptr %ts1.valp)
-  %v7 = add i64 0, 0
-  call void @glm_tbl_get(ptr %v0, i64 %v7, ptr %ts2.dst)
-  %ts2.loaded = load i64, ptr %ts2.dst
-%v5 = inttoptr i64 %ts2.loaded to ptr
-  %v10 = add i64 0, 1
+  %v6 = add i64 0, 1
+  %v7 = getelementptr inbounds [2 x i8], ptr @.str.1, i64 0, i64 0
+  %ts2.cast = ptrtoint ptr %v7 to i64
+store i64 %ts2.cast, ptr %ts2.valp
+  call void @glm_tbl_set(ptr %v0, i64 %v6, ptr %ts2.valp)
+  %v10 = add i64 0, 0
   call void @glm_tbl_get(ptr %v0, i64 %v10, ptr %ts3.dst)
-  %v8 = load i64, ptr %ts3.dst
-  call void @glm_print_string(ptr %v5)
-  call void @glm_print_sep()
-  call void @glm_print_int(i64 %v8)
+  %ts3.loaded = load i64, ptr %ts3.dst
+%v8 = inttoptr i64 %ts3.loaded to ptr
+  call void @glm_print_string(ptr %v8)
   call void @glm_print_nl()
   ret i32 0
 }

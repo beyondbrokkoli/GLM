@@ -1,6 +1,7 @@
--- EXPECT: 1	hello	2	world
+-- EXPECT: hello	1	world	2
 -- Records with matching keys but mixed field types compile cleanly.
--- Each record in the table has the same shape {x: Int, name: Str}.
+-- Each record in the table has the same shape {name: Str, x: Int}
+-- (canonicalized alphabetical slot order).
 local m = {}
 m[0] = {x: 1, name: "hello"}
 m[1] = {x: 2, name: "world"}

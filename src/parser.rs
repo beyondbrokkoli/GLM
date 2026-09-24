@@ -385,6 +385,11 @@ impl<'a> Parser<'a> {
                         }
                     }
                     self.expect(Token::RightBrace);
+                    // [Canonicalization Strike] Sort fields alphabetically so
+                    // slot assignment is name-canonical: {x:1, name:"a"} and
+                    // {name:"a", x:1} produce identical positional layouts.
+                    // Stable sort keeps duplicate keys in insertion order.
+                    fields.sort_by(|a, b| a.0.cmp(&b.0));
                     Expr::RecordCtor(fields)
                 } else {
                     // Pure array table ctor

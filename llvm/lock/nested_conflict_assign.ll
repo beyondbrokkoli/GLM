@@ -31,28 +31,28 @@ entry:
 b0:
   %v0 = call ptr @glm_tbl_new(i64 8, i8 0)
   %v2 = add i64 0, 0
-  %v4 = add i64 0, 1
-  %v5 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %v4 = getelementptr inbounds [6 x i8], ptr @.str.0, i64 0, i64 0
+  %v5 = add i64 0, 1
   %v3 = call ptr @glm_tbl_new(i64 8, i8 0)
   %v6 = add i64 0, 0
-  store i64 %v4, ptr %ts0.valp
+  %ts0.cast = ptrtoint ptr %v4 to i64
+store i64 %ts0.cast, ptr %ts0.valp
   call void @glm_tbl_set(ptr %v3, i64 %v6, ptr %ts0.valp)
   %v7 = add i64 0, 1
-  %ts1.cast = ptrtoint ptr %v5 to i64
-store i64 %ts1.cast, ptr %ts1.valp
+  store i64 %v5, ptr %ts1.valp
   call void @glm_tbl_set(ptr %v3, i64 %v7, ptr %ts1.valp)
   store ptr %v3, ptr %ts2.valp
   call void @glm_tbl_set(ptr %v0, i64 %v2, ptr %ts2.valp)
   %v9 = add i64 0, 1
-  %v11 = add i64 0, 2
-  %v12 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+  %v11 = getelementptr inbounds [6 x i8], ptr @.str.1, i64 0, i64 0
+  %v12 = add i64 0, 2
   %v10 = call ptr @glm_tbl_new(i64 8, i8 0)
   %v13 = add i64 0, 0
-  store i64 %v11, ptr %ts3.valp
+  %ts3.cast = ptrtoint ptr %v11 to i64
+store i64 %ts3.cast, ptr %ts3.valp
   call void @glm_tbl_set(ptr %v10, i64 %v13, ptr %ts3.valp)
   %v14 = add i64 0, 1
-  %ts4.cast = ptrtoint ptr %v12 to i64
-store i64 %ts4.cast, ptr %ts4.valp
+  store i64 %v12, ptr %ts4.valp
   call void @glm_tbl_set(ptr %v10, i64 %v14, ptr %ts4.valp)
   store ptr %v10, ptr %ts5.valp
   call void @glm_tbl_set(ptr %v0, i64 %v9, ptr %ts5.valp)
@@ -62,37 +62,37 @@ store i64 %ts4.cast, ptr %ts4.valp
 %v16 = inttoptr i64 %ts6.loaded to ptr
   %v19 = add i64 0, 0
   call void @glm_tbl_get(ptr %v16, i64 %v19, ptr %ts7.dst)
-  %v15 = load i64, ptr %ts7.dst
+  %ts7.loaded = load i64, ptr %ts7.dst
+%v15 = inttoptr i64 %ts7.loaded to ptr
   %v23 = add i64 0, 0
   call void @glm_tbl_get(ptr %v0, i64 %v23, ptr %ts8.dst)
   %ts8.loaded = load i64, ptr %ts8.dst
 %v21 = inttoptr i64 %ts8.loaded to ptr
   %v24 = add i64 0, 1
   call void @glm_tbl_get(ptr %v21, i64 %v24, ptr %ts9.dst)
-  %ts9.loaded = load i64, ptr %ts9.dst
-%v20 = inttoptr i64 %ts9.loaded to ptr
+  %v20 = load i64, ptr %ts9.dst
   %v28 = add i64 0, 1
   call void @glm_tbl_get(ptr %v0, i64 %v28, ptr %ts10.dst)
   %ts10.loaded = load i64, ptr %ts10.dst
 %v26 = inttoptr i64 %ts10.loaded to ptr
   %v29 = add i64 0, 0
   call void @glm_tbl_get(ptr %v26, i64 %v29, ptr %ts11.dst)
-  %v25 = load i64, ptr %ts11.dst
+  %ts11.loaded = load i64, ptr %ts11.dst
+%v25 = inttoptr i64 %ts11.loaded to ptr
   %v33 = add i64 0, 1
   call void @glm_tbl_get(ptr %v0, i64 %v33, ptr %ts12.dst)
   %ts12.loaded = load i64, ptr %ts12.dst
 %v31 = inttoptr i64 %ts12.loaded to ptr
   %v34 = add i64 0, 1
   call void @glm_tbl_get(ptr %v31, i64 %v34, ptr %ts13.dst)
-  %ts13.loaded = load i64, ptr %ts13.dst
-%v30 = inttoptr i64 %ts13.loaded to ptr
-  call void @glm_print_int(i64 %v15)
+  %v30 = load i64, ptr %ts13.dst
+  call void @glm_print_string(ptr %v15)
   call void @glm_print_sep()
-  call void @glm_print_string(ptr %v20)
+  call void @glm_print_int(i64 %v20)
   call void @glm_print_sep()
-  call void @glm_print_int(i64 %v25)
+  call void @glm_print_string(ptr %v25)
   call void @glm_print_sep()
-  call void @glm_print_string(ptr %v30)
+  call void @glm_print_int(i64 %v30)
   call void @glm_print_nl()
   ret i32 0
 }

@@ -1,4 +1,4 @@
-@.str.0 = private unnamed_addr constant [5 x i8] c"hero\00"
+@.str.0 = private unnamed_addr constant [2 x i8] c"a\00"
 declare ptr @glm_tbl_new(i64, i8)
 declare void @glm_tbl_get(ptr, i64, ptr)
 declare void @glm_tbl_set(ptr, i64, ptr)
@@ -18,8 +18,8 @@ entry:
   br label %b0
 
 b0:
-  %v1 = getelementptr inbounds [5 x i8], ptr @.str.0, i64 0, i64 0
-  %v2 = add i64 0, 0
+  %v1 = getelementptr inbounds [2 x i8], ptr @.str.0, i64 0, i64 0
+  %v2 = add i64 0, 1
   %v0 = call ptr @glm_tbl_new(i64 8, i8 0)
   %v3 = add i64 0, 0
   %ts0.cast = ptrtoint ptr %v1 to i64
