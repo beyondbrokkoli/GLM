@@ -297,29 +297,37 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                     let cast_var_cv = format!("%ts{}.cv", f);
 
                     // For records (i64 slots), cast non-integer values before store.
+                    // Record registers masquerade as Integer in reg_types (see
+                    // TableNew), so a record VALUE must be treated as a pointer.
+                    let val_is_record = record_regs.contains(value);
                     let val_cast = if elem == StaticType::Integer {
-                        match reg_types.get(value) {
-                            Some(StaticType::Float) => {
-                                format!("  {cv} = bitcast double %v{value} to i64\n  {cvv} = {cv}\n",
-                                    cv = cast_var, cvv = cast_var_cv)
+                        if val_is_record {
+                            format!("  {cv} = ptrtoint ptr %v{value} to i64\n  {cvv} = {cv}\n",
+                                cv = cast_var, cvv = cast_var_cv, value = value)
+                        } else {
+                            match reg_types.get(value) {
+                                Some(StaticType::Float) => {
+                                    format!("  {cv} = bitcast double %v{value} to i64\n  {cvv} = {cv}\n",
+                                        cv = cast_var, cvv = cast_var_cv, value = value)
+                                }
+                                Some(StaticType::Boolean) => {
+                                    format!("  {cv} = zext i1 %v{value} to i64\n  {cvv} = {cv}\n",
+                                        cv = cast_var, cvv = cast_var_cv, value = value)
+                                }
+                                Some(StaticType::String | StaticType::Table(_) | StaticType::Record(_)) => {
+                                    format!("  {cv} = ptrtoint ptr %v{value} to i64\n  {cvv} = {cv}\n",
+                                        cv = cast_var, cvv = cast_var_cv, value = value)
+                                }
+                                _ => String::new(),
                             }
-                            Some(StaticType::Boolean) => {
-                                format!("  {cv} = zext i1 %v{value} to i64\n  {cvv} = {cv}\n",
-                                    cv = cast_var, cvv = cast_var_cv)
-                            }
-                            Some(StaticType::String | StaticType::Table(_) | StaticType::Record(_)) => {
-                                format!("  {cv} = ptrtoint ptr %v{value} to i64\n  {cvv} = {cv}\n",
-                                    cv = cast_var, cvv = cast_var_cv)
-                            }
-                            _ => String::new(),
                         }
                     } else if matches!(elem, StaticType::Boolean) {
-                        format!("  {cv} = zext i1 %v{value} to i8\n", cv = cast_var)
+                        format!("  {cv} = zext i1 %v{value} to i8\n", cv = cast_var, value = value)
                     } else {
                         String::new()
                     };
 
-                    let val_use = if elem == StaticType::Integer && reg_types.get(value).map(|t| *t == StaticType::Float || *t == StaticType::Boolean || matches!(t, StaticType::String | StaticType::Table(_) | StaticType::Record(_))).unwrap_or(false) {
+                    let val_use = if elem == StaticType::Integer && (val_is_record || reg_types.get(value).map(|t| *t == StaticType::Float || *t == StaticType::Boolean || matches!(t, StaticType::String | StaticType::Table(_) | StaticType::Record(_))).unwrap_or(false)) {
                         cast_var_cv
                     } else if matches!(elem, StaticType::Boolean) {
                         cast_var
@@ -400,12 +408,19 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                         ));
                     } else if elem == StaticType::Integer {
                         // For records with integer slot, cast non-integer values to i64 before store.
-                        // Determine the source register's actual type.
-                        let val_ty = match reg_types.get(value) {
-                            Some(ty) => ty,
-                            None => &StaticType::Integer,
+                        // Determine the source register's actual type. Record registers are
+                        // typed Integer in reg_types (see TableNew), so consult record_regs
+                        // first: a record VALUE is a heap pointer and must be ptrtoint'ed
+                        // into the i64 slot, or the IR stores a raw ptr where i64 is expected.
+                        let val_ty = if record_regs.contains(value) {
+                            StaticType::Record(Vec::new())
+                        } else {
+                            match reg_types.get(value) {
+                                Some(ty) => ty.clone(),
+                                None => StaticType::Integer,
+                            }
                         };
-                        match val_ty {
+                        match &val_ty {
                             StaticType::Float => {
                                 // bitcast double to i64 for storage
                                 code.push_str(&format!(
