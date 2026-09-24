@@ -1,0 +1,22 @@
+TableOps: Element Type
+Table operations are deliberately representation-blind: each table value is one
+register (a pointer to the rt.rs header). Instructions never mention element types;
+the backend resolves the element off the table operand's recorded type at emit time.
+TableNew carries the element from shape analysis; TableGet/Set/SetFast read it from
+the table register's type.
+
+StructuralJoin: Phi Block
+CRITICAL BUGFIX (2026-09-23): Even branch-free fast paths (Dense/Sparse) must emit
+a structural tail join (`br label %bts{f}cont`) because phi nodes in enclosing
+blocks reference this label. The optimization is removing the *mode-check* branch,
+not the structural control-flow join. Without this, LLVM IR has undefined phi
+predecessors and fails to assemble.
+
+Instruction::TableNew.flags — Packed flags: bit 0 = mode (0=Dense, 1=Sparse), bit 7 = contains_tables.
+
+Instruction::TableNew.is_record — True if this is a record constructor (heterogeneous storage).
+
+Instruction::TableGet.target_ty — Expected element type for cast-on-load. For records, this is the field type.
+
+Instruction::SysAllocCount — Runtime allocation counter: returns current live table count.
+Zero-operand instruction (like a builtin function call).

@@ -1,0 +1,11 @@
+/target
+out.ll
+glm_out
+libglm_rt.a
+__pycache__/
+/llvm/diff/*
+!/llvm/diff/.gitkeep
+/log.txt
+.zcodeignore
+glm_runtime_fuzz
+.zcode/plans

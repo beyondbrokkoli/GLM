@@ -1,0 +1,516 @@
+use crate::ast::{BinOp, Expr, StaticType, Stmt, UnOp};
+use crate::shape::ShapeFacts;
+use std::collections::HashMap;
+
+pub struct TypeChecker<'a> {
+    scopes: Vec<HashMap<String, StaticType>>,
+    shape: &'a mut ShapeFacts,
+    substitutions: HashMap<usize, StaticType>,
+}
+
+impl<'a> TypeChecker<'a> {
+    pub fn new(shape: &'a mut ShapeFacts) -> Self {
+        Self {
+            scopes: vec![HashMap::new()],
+            shape,
+            substitutions: HashMap::new(),
+        }
+    }
+
+    pub fn check_program(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            self.check_stmt(stmt);
+        }
+        // Apply substitution bindings to all variable scopes so that
+        // var_type() always returns fully-resolved types for the lowerer.
+        self.resolve_all_scopes();
+    }
+
+    fn resolve_all_scopes(&mut self) {
+        // Flush substitutions back to ShapeFacts so the lowerer can resolve
+        // Unknown types via elem_of().
+        for (id, ty) in &self.substitutions {
+            self.shape.substitutions.insert(*id, ty.clone());
+        }
+        // Collect resolved types to avoid borrow checker issues.
+        let mut resolved: Vec<(String, StaticType)> = Vec::new();
+        for scope in &self.scopes {
+            for (name, ty) in scope {
+                resolved.push((name.clone(), self.resolve_var(ty)));
+            }
+        }
+        // Reassign resolved types back.
+        for (name, ty) in resolved {
+            for scope in &mut self.scopes {
+                if scope.contains_key(&name) {
+                    scope.insert(name.clone(), ty.clone());
+                }
+            }
+        }
+    }
+
+    fn begin_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+    fn end_scope(&mut self) {
+        self.scopes.pop().expect("Cannot pop global scope");
+    }
+
+    fn declare_var(&mut self, name: String, ty: StaticType) {
+        let current_scope = self.scopes.last_mut().unwrap();
+        if current_scope.contains_key(&name) {
+            panic!("Variable '{}' already declared in this scope", name);
+        }
+        current_scope.insert(name, ty);
+    }
+
+    fn var_type(&self, name: &str) -> StaticType {
+        for scope in self.scopes.iter().rev() {
+            if let Some(ty) = scope.get(name) {
+                return self.resolve_var(ty);
+            }
+        }
+        panic!("Undeclared variable: '{}'", name);
+    }
+
+    fn check_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::LocalDecl { names, exprs } => {
+                let mut expr_types = Vec::with_capacity(exprs.len());
+                for expr in exprs {
+                    expr_types.push(self.check_expr(expr));
+                }
+                for (name, ty) in names.iter().zip(expr_types) {
+                    self.declare_var(name.clone(), ty);
+                }
+            }
+            Stmt::Assignment { name, expr } => {
+                let expected = self.var_type(name);
+                if matches!(expr, Expr::Nil) {
+                    if !matches!(expected, StaticType::Table(_)) {
+                        panic!(
+                            "Type Error: 'nil' releases tables — '{}' is a {}",
+                            name,
+                            type_name(&expected)
+                        );
+                    }
+                    return;
+                }
+                let actual = self.check_expr(expr);
+                if expected != actual {
+                    // Reject reassigning an empty table constructor to a
+                    // variable that was initialized with concrete content.
+                    // Empty constructors produce Unknown types which only
+                    // participate in unification through element access.
+                    if is_empty_table_constructor(expr) {
+                        panic!(
+                            "Type Error: cannot assign {} to variable '{}' of type {}",
+                            type_name(&actual),
+                            name,
+                            type_name(&expected)
+                        );
+                    }
+                    // Use unification to resolve any Unknown type variables.
+                    self.unify(&expected, &actual);
+                    // Store the resolved type back into the scope.
+                    let resolved = self.resolve_var(&actual);
+                    for scope in self.scopes.iter_mut().rev() {
+                        if scope.contains_key(name) {
+                            scope.insert(name.clone(), resolved);
+                            break;
+                        }
+                    }
+                }
+            }
+            Stmt::IndexAssign { obj, key, value } => {
+                let (elem, _obj_desc) = self.check_index_base(obj);
+                let key_ty = self.check_expr(key);
+                if key_ty != StaticType::Integer {
+                    panic!(
+                        "Type Error: table index must be an Integer, got {}",
+                        type_name(&key_ty)
+                    );
+                }
+
+                let val_ty = self.check_expr(value);
+
+                // Strict monomorphism: nested table element types must match recursively.
+                if matches!(elem, StaticType::Table(_)) && matches!(val_ty, StaticType::Table(_)) {
+                    let expected_inner = match &elem {
+                        StaticType::Table(inner) => inner.as_ref(),
+                        _ => unreachable!(),
+                    };
+                    let actual_inner = match &val_ty {
+                        StaticType::Table(inner) => inner.as_ref(),
+                        _ => unreachable!(),
+                    };
+                    self.unify(expected_inner, actual_inner);
+                } else {
+                    // Both are non-table types, or there's a scalar vs table conflict
+                    // Unify will naturally typecheck them or throw a clean type conflict panic.
+                    self.unify(&elem, &val_ty);
+                }
+            }
+            Stmt::While { condition, body } => {
+                self.check_condition(condition, "while");
+                self.begin_scope();
+                for s in body {
+                    self.check_stmt(s);
+                }
+                self.end_scope();
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                self.check_condition(condition, "if");
+                self.begin_scope();
+                for s in then_body {
+                    self.check_stmt(s);
+                }
+                self.end_scope();
+                self.begin_scope();
+                for s in else_body {
+                    self.check_stmt(s);
+                }
+                self.end_scope();
+            }
+            Stmt::Do { body } => {
+                self.begin_scope();
+                for s in body {
+                    self.check_stmt(s);
+                }
+                self.end_scope();
+            }
+            Stmt::Print { exprs } => {
+                for e in exprs {
+                    let ty = self.check_expr(e);
+                    if matches!(ty, StaticType::Table(_)) {
+                        panic!(
+                            "Type Error: cannot print a table — print its cells or '#t' instead"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_index_base(&mut self, obj: &Expr) -> (StaticType, String) {
+        let ty = self.check_expr(obj);
+        match ty {
+            StaticType::Table(elem) => {
+                let desc = type_name(&StaticType::Table(elem.clone()));
+                (*elem, desc)
+            }
+            StaticType::Record(fields) => {
+                // Records are stored as tables internally — field 0 = first value, etc.
+                // Element type is the first field's type.
+                let first_ty = fields.first().map(|(_, ty)| ty.clone())
+                    .unwrap_or(StaticType::Integer);
+                let desc = type_name(&StaticType::Table(Box::new(first_ty.clone())));
+                (first_ty, desc)
+            }
+            _ => panic!(
+                "Type Error: cannot index {} — only tables support '[]'",
+                type_name(&ty)
+            ),
+        }
+    }
+
+    fn check_condition(&mut self, condition: &Expr, kw: &str) {
+        let ty = self.check_expr(condition);
+        if ty != StaticType::Boolean {
+            panic!(
+                "Type Error: '{}' condition must be a Boolean, got {}",
+                kw,
+                type_name(&ty)
+            );
+        }
+    }
+
+    fn check_expr(&mut self, expr: &Expr) -> StaticType {
+        match expr {
+            Expr::Integer(_) => StaticType::Integer,
+            Expr::Float(_) => StaticType::Float,
+            Expr::Boolean(_) => StaticType::Boolean,
+            Expr::String(_) => StaticType::String,
+            Expr::Nil => panic!(
+                "Type Error: 'nil' is only valid as the right-hand side of 't = nil' — \
+                 it releases a table's memory, it is not a value"
+            ),
+            Expr::TableCtor(elems) => {
+                let elem = self.shape.elem_of(expr);
+                for e in elems {
+                    let ty = self.check_expr(e);
+                    // Allow nested table types — the runtime supports deep-free.
+                    if matches!(elem, StaticType::Table(_)) && matches!(ty, StaticType::Table(_)) {
+                        // Both are tables — compare their resolved inner types.
+                        let expected_inner = match &elem {
+                            StaticType::Table(inner) => inner.as_ref(),
+                            _ => unreachable!(),
+                        };
+                        let actual_inner = match &ty {
+                            StaticType::Table(inner) => inner.as_ref(),
+                            _ => unreachable!(),
+                        };
+                        if expected_inner != actual_inner {
+                            self.unify(expected_inner, actual_inner);
+                        }
+                    } else if ty != elem {
+                        panic!(
+                            "Type Error: mixed table constructor elements — {} after {}",
+                            type_name(&ty),
+                            type_name(&elem)
+                        );
+                    }
+                }
+                StaticType::Table(Box::new(elem))
+            }
+            Expr::RecordCtor(fields) => {
+                let mut record_types: Vec<(String, StaticType)> = Vec::with_capacity(fields.len());
+                for (name, val_expr) in fields.iter() {
+                    let val_ty = self.check_expr(val_expr);
+                    record_types.push((name.to_string(), val_ty));
+                }
+                StaticType::Record(record_types)
+            }
+            Expr::Index { obj, key } => {
+                let (elem, _) = self.check_index_base(obj);
+                let key_ty = self.check_expr(key);
+                if key_ty != StaticType::Integer {
+                    panic!(
+                        "Type Error: table index must be an Integer, got {}",
+                        type_name(&key_ty)
+                    );
+                }
+                elem
+            }
+            Expr::Identifier(name) => self.var_type(name),
+            Expr::BinaryOp { op, left, right } => {
+                let l = self.check_expr(left);
+                let r = self.check_expr(right);
+                match op {
+                    BinOp::And | BinOp::Or => {
+                        if l == StaticType::Boolean && r == StaticType::Boolean {
+                            StaticType::Boolean
+                        } else {
+                            panic!(
+                                "Type Error: '{}' requires Boolean operands on both sides",
+                                match op {
+                                    BinOp::And => "and",
+                                    _ => "or",
+                                }
+                            )
+                        }
+                    }
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::IntDiv
+                    | BinOp::Mod => self.numeric_operand(&l, &r, op),
+                    BinOp::LessThan | BinOp::GreaterThan | BinOp::LessEq | BinOp::GreaterEq => {
+                        self.numeric_operand(&l, &r, op);
+                        StaticType::Boolean
+                    }
+                    BinOp::Equal | BinOp::NotEqual => {
+                        if l == StaticType::String || r == StaticType::String {
+                            panic!("Type Error: String comparison is not supported yet");
+                        }
+                        if !types_compatible(&l, &r) {
+                            panic!(
+                                "Type Error: '{}' compares {} with {}",
+                                match op {
+                                    BinOp::Equal => "==",
+                                    _ => "~=",
+                                },
+                                type_name(&l),
+                                type_name(&r)
+                            );
+                        }
+                        StaticType::Boolean
+                    }
+                }
+            }
+            Expr::UnaryOp { op, expr } => {
+                let t = self.check_expr(expr);
+                match op {
+                    UnOp::Neg => match t {
+                        StaticType::Integer | StaticType::Float => t,
+                        _ => panic!("Type Error: unary '-' requires a numeric operand"),
+                    },
+                    UnOp::Not => match t {
+                        StaticType::Boolean => StaticType::Boolean,
+                        _ => panic!("Type Error: 'not' requires a Boolean operand"),
+                    },
+                    UnOp::Len => match self.resolve_var(&t) {
+                        StaticType::Table(_) => StaticType::Integer,
+                        _ => panic!(
+                            "Type Error: '#' requires a table operand, got {}",
+                            type_name(&t)
+                        ),
+                    },
+                }
+            }
+            Expr::SysAllocCount => StaticType::Integer,
+        }
+    }
+
+    fn numeric_operand(&self, l: &StaticType, r: &StaticType, op: &BinOp) -> StaticType {
+        match (l, r) {
+            (StaticType::Integer, StaticType::Integer) => StaticType::Integer,
+            (StaticType::Float, StaticType::Float) => StaticType::Float,
+            (StaticType::Integer, StaticType::Float) | (StaticType::Float, StaticType::Integer) => {
+                panic!(
+                    "Type Error: '{}' does not support mixed Integer and Float operands",
+                    bin_op_name(op)
+                )
+            }
+            _ => panic!(
+                "Type Error: '{}' requires numeric operands",
+                bin_op_name(op)
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type Unification Engine
+// ---------------------------------------------------------------------------
+
+impl<'a> TypeChecker<'a> {
+    fn resolve_var(&self, ty: &StaticType) -> StaticType {
+        match ty {
+            StaticType::Unknown(id) => match self.substitutions.get(id) {
+                Some(resolved) => self.resolve_var(resolved),
+                None => ty.clone(),
+            },
+            StaticType::Table(inner) => {
+                StaticType::Table(Box::new(self.resolve_var(inner)))
+            }
+            StaticType::Record(fields) => StaticType::Record(
+                fields.iter().map(|(name, ty)| (name.clone(), self.resolve_var(ty))).collect()
+            ),
+            other => other.clone(),
+        }
+    }
+
+    fn unify(&mut self, expected: &StaticType, actual: &StaticType) {
+        match (expected, actual) {
+            // Same type — trivially unify.
+            (a, b) if a == b => (),
+
+            // Both Unknown — bind the second to the first (if different IDs).
+            (StaticType::Unknown(id_a), StaticType::Unknown(id_b)) if id_a != id_b => {
+                self.substitutions
+                    .insert(*id_b, StaticType::Unknown(*id_a));
+            }
+
+            // Bind the Unknown to the concrete type.
+            (StaticType::Unknown(_), _) | (_, StaticType::Unknown(_)) => {
+                let (u_id, c_ty) = match (expected, actual) {
+                    (StaticType::Unknown(id), ty) => (*id, ty.clone()),
+                    (ty, StaticType::Unknown(id)) => (*id, ty.clone()),
+                    _ => unreachable!(),
+                };
+                self.substitutions.insert(u_id, c_ty);
+            }
+
+            // Both tables — recursively unify element types.
+            (StaticType::Table(e1), StaticType::Table(e2)) => {
+                let e1 = self.resolve_var(e1);
+                let e2 = self.resolve_var(e2);
+                self.unify(&e1, &e2);
+            }
+
+            // Type conflict.
+            _ => {
+                panic!(
+                    "Type Error: type conflict — {} vs {}",
+                    type_name(expected),
+                    type_name(actual)
+                );
+            }
+        }
+    }
+}
+
+fn is_empty_table_constructor(expr: &Expr) -> bool {
+    matches!(expr, Expr::TableCtor(elems) if elems.is_empty())
+}
+
+fn types_compatible(l: &StaticType, r: &StaticType) -> bool {
+    match (l, r) {
+        (a, b) if a == b => true,
+        // Two Unknowns are always compatible (they may unify).
+        (StaticType::Unknown(_), StaticType::Unknown(_)) => true,
+        // Unknown is compatible with any concrete type.
+        (StaticType::Unknown(_), _) | (_, StaticType::Unknown(_)) => true,
+        // Two tables are compatible if their inner element types are compatible.
+        (StaticType::Table(e1), StaticType::Table(e2)) => types_compatible(e1, e2),
+        // Two records are compatible if their inner field types are compatible.
+        (StaticType::Record(f1), StaticType::Record(f2)) => types_compatible_records(f1, f2),
+        // Everything else is a conflict.
+        _ => false,
+    }
+}
+
+fn types_compatible_records(f1: &[(String, StaticType)], f2: &[(String, StaticType)]) -> bool {
+    if f1.len() != f2.len() {
+        return false;
+    }
+    for (name1, ty1) in f1 {
+        if let Some((_, ty2)) = f2.iter().find(|(n, _)| n == name1) {
+            if !types_compatible(ty1, ty2) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn type_name(ty: &StaticType) -> String {
+    match ty {
+        StaticType::Integer => "Integer".to_string(),
+        StaticType::Float => "Float".to_string(),
+        StaticType::Boolean => "Boolean".to_string(),
+        StaticType::String => "String".to_string(),
+            StaticType::Table(elem) => match **elem {
+                StaticType::Integer => "IntTable".to_string(),
+                StaticType::Float => "FloatTable".to_string(),
+                StaticType::Boolean => "BoolTable".to_string(),
+                StaticType::String => "StringTable".to_string(),
+                StaticType::Unknown(_) => "Table<?>".to_string(),
+                _ => format!("Table of {}", type_name(elem)),
+            },
+            StaticType::Record(fields) => {
+                let parts: Vec<String> = fields.iter()
+                    .map(|(name, ty)| format!("{}:{}", name, type_name(ty)))
+                    .collect();
+                format!("Record<{}>", parts.join(", "))
+            }
+        StaticType::Unknown(_) => "?".to_string(),
+    }
+}
+
+fn bin_op_name(op: &BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::IntDiv => "//",
+        BinOp::Mod => "%",
+        BinOp::LessThan => "<",
+        BinOp::GreaterThan => ">",
+        BinOp::LessEq => "<=",
+        BinOp::GreaterEq => ">=",
+        BinOp::Equal => "==",
+        BinOp::NotEqual => "~=",
+        BinOp::And => "and",
+        BinOp::Or => "or",
+    }
+}

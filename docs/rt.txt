@@ -1,0 +1,62 @@
+MemoryLayout: GlmTable
+A table value is one machine word — a pointer to a stable #[repr(C)] header.
+Field layout (offset: type):
+  data@0:       *mut u8   — the element buffer (never moves the header)
+  len@8:        i64       — the zeroed, addressable span (doubling watermark)
+  reserve@16:   usize     — 0 = malloc world; nonzero = PROT_NONE VA reservation
+  esize@24:     usize     — element size: 8 for int/float/str/table, 1 for bool
+  mode@32:      TableMode — 0 = Dense (flat buffer), 1 = Sparse (HashMap)
+  contains_tbl@33: u8     — 1 = elements include nested tables (deep-free flag)
+  sparse_map@40: *mut HashMap — opaque pointer when mode == Sparse
+Total: 48 bytes (6 machine words).
+
+THE ALIAS INVARIANT: the header NEVER moves. Only the data buffer does.
+Every live copy of a table value points at the header, so growth may relocate
+the buffer freely, table values stay plain SSA ptrs, and growth never invalidates
+live table values. This is the entire alias story.
+
+ALLOC_COUNT — Global live-allocation tracker: incremented on each `glm_tbl_new`,
+decremented on each `glm_tbl_free`. Exposed via `sys_alloc_count()`
+for test harnesses to observe memory leaks at runtime.
+
+[glm_tbl_new]
+# Safety
+`esize` is 1 or 8 (the checker-pinned element sizes).
+`flags` is a packed byte: bit 0 = mode (0=Dense, 1=Sparse), bit 7 = contains_tables.
+
+[glm_tbl_grow]
+# Safety
+`t` live from glm_tbl_new; `idx` non-negative, non-overflowing.
+
+[glm_tbl_reserve]
+# Safety
+`t` live from glm_tbl_new; on return the span covers `n` cells.
+
+[upgrade_to_sparse]
+# Safety
+`t` is a live, mutable pointer from `glm_tbl_new`; `t.data` points
+to a valid buffer of at least `t.len * t.esize` bytes when mode == Dense.
+
+[glm_tbl_set]
+# Safety
+`t` live from glm_tbl_new; `val` points to `esize` bytes of data.
+
+[glm_tbl_get]
+# Safety
+`t` live from glm_tbl_new; `dst` points to a caller-allocated slot.
+
+[glm_tbl_len]
+# Safety
+`t` live from glm_tbl_new.
+
+[glm_tbl_free]
+# Safety
+`t` live from glm_tbl_new, or null.
+
+[glm_print_string]
+# Safety
+`val` NUL-terminated and readable through the terminator.
+
+[sys_alloc_count]
+Return the current number of live table allocations.
+Incremented on `glm_tbl_new`, decremented on `glm_tbl_free`.

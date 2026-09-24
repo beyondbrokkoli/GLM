@@ -1,0 +1,32 @@
+The type checker: unifies StaticTypes across scopes, binding Unknown type
+variables (from empty table constructors) on first touch via a substitution
+map, and flushes the bindings into ShapeFacts for the lowerer.
+
+TypeChecker.substitutions — Substitution map: Unknown variable ID → resolved type.
+Built during unification; enables empty tables to "lock in"
+their element type on first element assignment.
+
+[resolve_all_scopes]
+Resolve every Unknown(id) in all scopes using the substitution map.
+Called at the end of check_program() to propagate unification
+results to the variable types that the lowerer reads.
+
+[resolve_var]
+Follow the substitution chain for a type, replacing each Unknown
+with its bound type until no more substitutions exist.
+
+[unify]
+Unify two types. If either side contains an Unknown variable,
+bind it to the other type in the substitution map.
+Returns the first type conflict encountered.
+
+[is_empty_table_constructor]
+Check if an expression is an empty table constructor `{}`.
+
+[types_compatible]
+Check if two types are potentially compatible — i.e., they can
+be unified without conflict. `Unknown` types are compatible with
+everything since they may resolve to equal types.
+
+[types_compatible_records]
+Check if two record types are compatible: same keys with compatible inner types.

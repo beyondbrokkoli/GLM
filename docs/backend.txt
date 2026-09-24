@@ -1,0 +1,3 @@
+The LLVM IR backend: lowers the ir::IrProgram to textual LLVM IR (out.ll),
+resolving table element types off shape analysis at emit time and declaring
+the rt.rs C-ABI imports.

@@ -1,0 +1,2 @@
+Binary entry point: declares the compiler module tree and runs the
+lexer → parser → type check → shape analysis → lowering → codegen pipeline.

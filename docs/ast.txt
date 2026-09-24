@@ -1,0 +1,11 @@
+AST node and static-type definitions shared by every pass of the compiler.
+
+StaticType::Unknown — Unresolved type variable (used for empty table constructors `{}`).
+The `usize` is a unique variable ID, resolved via the type checker's
+substitution map during first-touch unification.
+
+StaticType::Record — Record type: `{field: Int, name: String, ...}` — heterogeneous fields.
+
+Expr::RecordCtor — Record (struct-like) constructor: `{field: expr, ...}` — heterogeneous fields.
+
+Expr::SysAllocCount — Builtin: `sys_alloc_count()` — runtime live allocation counter.

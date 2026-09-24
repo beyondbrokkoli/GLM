@@ -1,0 +1,2 @@
+Recursive-descent parser: turns the lexer's token stream into
+`ast::Stmt`/`ast::Expr` trees.
