@@ -283,6 +283,17 @@ impl Analyzer {
             panic!("Type Error: heterogeneous tables are not supported.");
         }
 
+        // [Deep-Free Preservation Strike] A Record site keeps its Record type
+        // even when it has tracked child constructors: the child_sites fast
+        // path below would otherwise retype {data: {1,2,3}} into
+        // Table(Table(Int)), erasing Record-ness — which stripped the
+        // deep-free flag at lowering and leaked the child.
+        if let Record(fields) = &self.site_elem[id] {
+            return crate::ast::StaticType::Record(
+                fields.iter().map(|(name, ty)| (name.clone(), self.ty_to_static(ty))).collect()
+            );
+        }
+
         // Fast path for tracked child constructors: enforce multi-child coherence
         if let Some(children) = self.child_sites.get(&id) {
             let mut uniform_type: Option<crate::ast::StaticType> = None;

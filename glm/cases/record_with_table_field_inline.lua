@@ -1,10 +1,10 @@
--- EXPECT: 1
--- BASELINE: wrong-but-current (BS-4). A record with an inline table
--- field is retyped Table(Table(Int)) by shape's child_sites fast
--- path (shape.rs:287-310): the block-exit free fires for the record
--- header, but the deep-free flag computes from the retyped element,
--- no longer matches Record(_), and drops bit 0x80 — the child
--- table leaks. Net: 2 allocations, 1 free, counter 1.
+-- EXPECT: 0
+-- FIXED by the deep-free preservation strike (was 1, BS-4). Shape's
+-- child_sites fast path no longer strips Record-ness from records
+-- with inline table fields, so the record keeps its Record type, the
+-- block-exit free covers it (lifecycle strike), and the deep-free
+-- flag is computed from the real field types (data is an inline
+-- TableCtor) — the child table frees with the parent.
 do
   local b = { data: { 1, 2, 3 } }
 end

@@ -1,11 +1,11 @@
 -- EXPECT: a
--- EXPECT: 1
--- FIXED by the coercion strike (was EXPECT_BUILD_FAIL: invalid LLVM
--- IR, BS-3): nested record round-trip a[0][0] == 'a'.
--- Counter after the lifecycle-parity strike: the outer record frees
--- at block exit (was 2), but the inner record still leaks — the
--- deep-free flag is unset for nested RECORD fields (BS-4, closed by
--- the next strike). Baseline was 2; now 1; target is 0.
+-- EXPECT: 0
+-- FIXED by the coercion + lifecycle + deep-free strikes (was a
+-- build-fail pin: invalid LLVM IR from the missing ptrtoint; then
+-- stepwise counter leaks of 2, then 1). Nested record round-trip
+-- a[0][0] == 'a'; the outer record frees at block exit with the
+-- deep-free flag set (inline Record field), so the inner record is
+-- freed too — the counter returns to 0.
 do
   local a = { inner: { x: 1, name: "a" } }
   print(a[0][0])

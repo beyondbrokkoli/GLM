@@ -577,22 +577,30 @@ impl<'a> IrLowerer<'a> {
                 // The distinction is purely at the shape/typing level.
                 let record_ty = self.shape.elem_of(expr);
 
-                // [Variable Capture: Deep-Free Ownership]
-                let mut has_inline_tables = false;
+                // [Deep-Free Ownership: Strike 4] Only *inline* constructors
+                // (TableCtor or RecordCtor literals) are owned by this record;
+                // fields holding named identifiers manage their own lifetime
+                // via block-scoping, and flagging them would double-free.
+                // Strings are interned .rodata globals, never heap-owned, so
+                // they must never contribute the deep-free flag.
+                let mut has_inline_children = false;
                 for (_, val) in fields {
-                    if matches!(val, Expr::TableCtor(_)) {
-                        has_inline_tables = true;
+                    if matches!(val, Expr::TableCtor(_) | Expr::RecordCtor(_)) {
+                        has_inline_children = true;
                     }
                 }
 
-                // Check if element type is a table for contains_tables flag
+                // Check if element type is a table or a nested record for the
+                // contains_tables flag (both are heap GlmTables to deep-free).
                 let is_table_elem = match &record_ty {
                     StaticType::Record(rec_fields) => {
-                        rec_fields.iter().any(|(_, ty)| matches!(ty, StaticType::Table(_)))
+                        rec_fields.iter().any(|(_, ty)| {
+                            matches!(ty, StaticType::Table(_) | StaticType::Record(_))
+                        })
                     }
                     _ => false,
                 };
-                let contains_tables = is_table_elem && has_inline_tables;
+                let contains_tables = is_table_elem && has_inline_children;
 
                 let mut elem_regs = Vec::with_capacity(fields.len());
                 for (_, val) in fields {

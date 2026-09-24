@@ -45,8 +45,8 @@ store i64 %ts2.cast, ptr %ts2.valp
   %v8 = load i64, ptr %ts4.dst
   call void @glm_print_int(i64 %v8)
   call void @glm_print_nl()
-  call void @glm_tbl_free(ptr %v0)
   call void @glm_tbl_free(ptr %v3)
+  call void @glm_tbl_free(ptr %v0)
   %v14 = call i64 @sys_alloc_count()
   call void @glm_print_int(i64 %v14)
   call void @glm_print_nl()

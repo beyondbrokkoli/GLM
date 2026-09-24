@@ -31,7 +31,7 @@ store i64 %ts0.cast, ptr %ts0.valp
   %v5 = add i64 0, 1
   store i64 %v3, ptr %ts1.valp
   call void @glm_tbl_set(ptr %v1, i64 %v5, ptr %ts1.valp)
-  %v0 = call ptr @glm_tbl_new(i64 8, i8 0)
+  %v0 = call ptr @glm_tbl_new(i64 8, i8 128)
   %v6 = add i64 0, 0
   %ts2.cast = ptrtoint ptr %v1 to i64
 store i64 %ts2.cast, ptr %ts2.valp
