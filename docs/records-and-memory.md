@@ -1,5 +1,23 @@
 # Records and Memory — Baseline Comprehension Report
 
+> **POST-STRIKE STATUS (implementation phase, commits afbae65..3341b12).**
+> Sections A-C and BS-1..BS-10 describe the frozen baseline (2380732) and
+> remain accurate as history. The implementation strikes then fixed:
+> **BS-1** (strike 3: nil-drop + block-exit parity), **BS-2's
+> confusion vector** (strike 1: alphabetical canonicalization — the
+> layers now agree; BS-5's first-field typing is still open),
+> **BS-3** (strike 2: record_regs-aware ptrtoint), **BS-4** (strike 4:
+> Record-ness preserved + inline-child deep-free, Strings excluded),
+> **BS-10** (strike 3: LIFO determinism). Still open: **BS-5**
+> (first-field typing on positional writes), **BS-6** (print/# on
+> records), **BS-8** (duplicate keys, len floor), **BS-9** (null-table
+> uninitialized reads), and the **residual ownership gap** for
+> records stored into tables (`record_in_table_first_touch_leak`,
+> still 1 — needs an ownership edge for first-touch-stored values,
+> not a flag tweak). A spec-sheet rewrite of the docs/ folklore was
+> drafted and superseded by the strikes; this file remains the
+> authoritative map.
+
 Frozen reference: commit `2380732` ("glm"), working tree clean.
 Every claim below was verified two ways: against the source with
 `file:line` citations, and against the binary
