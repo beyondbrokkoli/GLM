@@ -1,11 +1,15 @@
 -- EXPECT: 42
--- BASELINE: current behavior, restricted. An identifier-held table
--- field keeps the record's Record type (no child site), so the
--- record itself leaks at block exit and only field 0 is printable:
--- the checker types EVERY record index as field 0's type
--- (type_checker.rs:206-213); r[1] ("nested", a Str) is
--- checker-typed Table(Int) and rejected by the print gate —
--- see record_nonfirst_field_print_rejected.lua.
-local inner_tbl = { 42 }
-local r = { data: inner_tbl, label: "nested" }
-print(r[0][0])
+-- EXPECT: 0
+-- FIXED by the lifecycle-parity strike (was 1): the record r now
+-- frees at block exit and inner_tbl is freed as its own Table local,
+-- so the block nets zero. The deep-free flag stays unset (data holds
+-- a named identifier, not an inline constructor — ownership belongs
+-- to inner_tbl's own binding; flagging it would double-free).
+-- Field access note: r[0][0] prints because field 0 holds the table;
+-- non-first fields remain unprintable (BS-2 family, unfixed).
+do
+  local inner_tbl = { 42 }
+  local r = { data: inner_tbl, label: "nested" }
+  print(r[0][0])
+end
+print(sys_alloc_count())

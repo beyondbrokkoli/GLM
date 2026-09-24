@@ -405,10 +405,22 @@ impl<'a> IrLowerer<'a> {
                 if let Some(block_local) = self.scopes.last_mut() {
                     let locals: Vec<(String, RegId)> = block_local
                         .iter()
-                        .filter(|(_, local)| matches!(local.ty, StaticType::Table(_)))
+                        .filter(|(_, local)| {
+                            // [Lifecycle Parity Strike] Records are heap
+                            // GlmTables too — block-exit frees them exactly
+                            // like tables (deep-free ownership is decided
+                            // separately by the contains_tables flag).
+                            matches!(local.ty, StaticType::Table(_) | StaticType::Record(_))
+                        })
                         .filter(|(name, _)| !outer_keys.contains(*name))
                         .map(|(name, local)| (name.clone(), local.reg))
                         .collect();
+                    // [Determinism Fix] HashMap iteration order is
+                    // per-process random; sort by register id so the
+                    // block-exit frees emit in reverse construction
+                    // order (LIFO) and codegen stays byte-identical.
+                    let mut locals = locals;
+                    locals.sort_by_key(|(_, reg)| *reg);
                     for (_, reg) in locals.into_iter().rev() {
                         self.emit(Instruction::TableFree { table: reg });
                     }
@@ -416,6 +428,7 @@ impl<'a> IrLowerer<'a> {
 
                 self.scopes.pop();
             }
+
             Stmt::Print { exprs } => {
                 let mut operands = Vec::new();
                 for e in exprs {

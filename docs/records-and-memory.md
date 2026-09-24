@@ -492,6 +492,17 @@ m[0][0] = 5        -- silent no-op into null row
 print(m[0][0])     -- uninitialized stack read, value varies by run
 ```
 
+**BS-10 — Block-exit free order was nondeterministic (found by the
+corpus during Strike 3).** The do-block exit free collected locals by
+iterating a `HashMap<String, Local>` (`src/lowerer.rs:405-415`),
+so with two or more heap locals in one block the emitted
+`glm_tbl_free` calls came in per-process random order. Memory-safe
+(independent frees) but a violation of the codegen-freeze invariant
+THE BOSS enforces — no corpus case had two heap locals in one block
+until `record_with_table_field_named.lua`. Fixed in Strike 3 by
+sorting on register id: frees now emit in reverse construction order
+(LIFO), byte-identical across processes (verified 3× md5).
+
 ---
 
 ## D. The Ghost Map — migration plan for the implicit-integer fallback

@@ -1,5 +1,6 @@
 @.str.0 = private unnamed_addr constant [2 x i8] c"a\00"
 declare ptr @glm_tbl_new(i64, i8)
+declare void @glm_tbl_free(ptr)
 declare void @glm_tbl_get(ptr, i64, ptr)
 declare void @glm_tbl_set(ptr, i64, ptr)
 declare i64 @sys_alloc_count()
@@ -45,6 +46,7 @@ store i64 %ts2.cast, ptr %ts2.valp
 %v7 = inttoptr i64 %ts4.loaded to ptr
   call void @glm_print_string(ptr %v7)
   call void @glm_print_nl()
+  call void @glm_tbl_free(ptr %v0)
   %v13 = call i64 @sys_alloc_count()
   call void @glm_print_int(i64 %v13)
   call void @glm_print_nl()

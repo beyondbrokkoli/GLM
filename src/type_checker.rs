@@ -87,7 +87,11 @@ impl<'a> TypeChecker<'a> {
             Stmt::Assignment { name, expr } => {
                 let expected = self.var_type(name);
                 if matches!(expr, Expr::Nil) {
-                    if !matches!(expected, StaticType::Table(_)) {
+                    // [Lifecycle Parity Strike] Records are heap GlmTables
+                    // exactly like tables, so they are valid nil-release
+                    // targets: the shape layer's sole-ownership proof and
+                    // the lowerer's TableFree emission are type-agnostic.
+                    if !matches!(expected, StaticType::Table(_) | StaticType::Record(_)) {
                         panic!(
                             "Type Error: 'nil' releases tables — '{}' is a {}",
                             name,

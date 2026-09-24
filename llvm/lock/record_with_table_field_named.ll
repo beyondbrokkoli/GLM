@@ -1,7 +1,9 @@
 @.str.0 = private unnamed_addr constant [7 x i8] c"nested\00"
 declare ptr @glm_tbl_new(i64, i8)
+declare void @glm_tbl_free(ptr)
 declare void @glm_tbl_get(ptr, i64, ptr)
 declare void @glm_tbl_set(ptr, i64, ptr)
+declare i64 @sys_alloc_count()
 declare void @glm_print_int(i64)
 declare void @glm_print_float(double)
 declare void @glm_print_bool(i1)
@@ -42,6 +44,11 @@ store i64 %ts2.cast, ptr %ts2.valp
   call void @glm_tbl_get(ptr %v9, i64 %v12, ptr %ts4.dst)
   %v8 = load i64, ptr %ts4.dst
   call void @glm_print_int(i64 %v8)
+  call void @glm_print_nl()
+  call void @glm_tbl_free(ptr %v0)
+  call void @glm_tbl_free(ptr %v3)
+  %v14 = call i64 @sys_alloc_count()
+  call void @glm_print_int(i64 %v14)
   call void @glm_print_nl()
   ret i32 0
 }

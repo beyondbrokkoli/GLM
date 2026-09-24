@@ -14,7 +14,6 @@ define i32 @main() {
 entry:
   %ts0.valp = alloca i64
   %ts1.valp = alloca i64
-  %ts2.valp = alloca i64
   br label %b0
 
 b0:
@@ -28,18 +27,13 @@ store i64 %ts0.cast, ptr %ts0.valp
   %v4 = add i64 0, 1
   store i64 %v2, ptr %ts1.valp
   call void @glm_tbl_set(ptr %v0, i64 %v4, ptr %ts1.valp)
-  call void @glm_tbl_free(ptr %v0)
   %v6 = call i64 @sys_alloc_count()
   call void @glm_print_int(i64 %v6)
   call void @glm_print_nl()
-  %v7 = call ptr @glm_tbl_new(i64 8, i8 0)
-  %v9 = add i64 0, 0
-  %v10 = add i64 0, 1
-  store i64 %v10, ptr %ts2.valp
-  call void @glm_tbl_set(ptr %v7, i64 %v9, ptr %ts2.valp)
-  call void @glm_tbl_free(ptr %v7)
-  %v12 = call i64 @sys_alloc_count()
-  call void @glm_print_int(i64 %v12)
+  call void @glm_tbl_free(ptr %v0)
+  %v7 = inttoptr i64 0 to ptr
+  %v9 = call i64 @sys_alloc_count()
+  call void @glm_print_int(i64 %v9)
   call void @glm_print_nl()
   ret i32 0
 }
