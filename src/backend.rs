@@ -48,7 +48,7 @@ fn llvm_bytes(bytes: &[u8]) -> String {
     out
 }
 
-pub fn generate_llvm_ir(program: &IrProgram) -> String {
+pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
     let mut globals = String::new();
     let mut str_idx = 0;
     let mut needs_floor_decl = false;
@@ -195,7 +195,7 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                         match reg_types.get(table) {
                             Some(StaticType::Table(elem)) => (**elem).clone(),
                             Some(StaticType::Record(_)) => StaticType::Integer,
-                            _ => unreachable!("backend tracks every table reg's type"),
+                            _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
                         }
                     };
                     // Store the field type in reg_types so Print dispatches correctly.
@@ -286,7 +286,7 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                         match reg_types.get(table) {
                             Some(StaticType::Table(elem)) => (**elem).clone(),
                             Some(StaticType::Record(_)) => StaticType::Integer,
-                            _ => unreachable!("backend tracks every table reg's type"),
+                            _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
                         }
                     };
                     needs_hdr_md = true;
@@ -400,7 +400,7 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                         match reg_types.get(table) {
                             Some(StaticType::Table(elem)) => (**elem).clone(),
                             Some(StaticType::Record(_)) => StaticType::Integer,
-                            _ => unreachable!("backend tracks every table reg's type"),
+                            _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
                         }
                     };
                     needs_tbl_set_decl = true;
@@ -546,10 +546,10 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                             StaticType::Float => code.push_str(&format!("  call void @glm_print_float(double %v{})\n", r)),
                             StaticType::Boolean => code.push_str(&format!("  call void @glm_print_bool(i1 %v{})\n", r)),
                             StaticType::String => code.push_str(&format!("  call void @glm_print_string(ptr %v{})\n", r)),
-                            StaticType::Table(_) => unreachable!("tables cannot be printed"),
+                            StaticType::Table(_) => return Err(vec!["Type Error: tables cannot be printed".to_string()]),
                             // Unconstrained Unknown types: print 0 as a 1-byte dummy.
                             StaticType::Unknown(_) => code.push_str("  call void @glm_print_int(i64 0)\n"),
-                            StaticType::Record(_) => unreachable!("records compile as tables, cannot be printed directly"),
+                            StaticType::Record(_) => return Err(vec!["Type Error: records compile as tables, cannot be printed directly".to_string()]),
                         }
                     }
                     code.push_str("  call void @glm_print_nl()\n");
@@ -599,7 +599,7 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
     } else {
         String::new()
     };
-    format!("{}{}{}{}", globals, head, out, md)
+    Ok(format!("{}{}{}{}", globals, head, out, md))
 }
 
 fn math_op(target: &RegId, left: &RegId, right: &RegId, int_op: &str, flt_op: &str, code: &mut String, reg_types: &mut HashMap<RegId, StaticType>) {

@@ -1,5 +1,6 @@
 use crate::ast::{BinOp, Expr, StaticType, Stmt, UnOp};
 use crate::shape::ShapeFacts;
+use glm_rt::{signal, trace};
 use std::collections::BTreeMap;
 
 pub struct TypeChecker<'a> {
@@ -18,12 +19,28 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn check_program(&mut self, stmts: &[Stmt]) {
-        for stmt in stmts {
-            self.check_stmt(stmt);
-        }
+        self.check_block(stmts);
         // Apply substitution bindings to all variable scopes so that
         // var_type() always returns fully-resolved types for the lowerer.
         self.resolve_all_scopes();
+    }
+
+    /// The ghost-run boundary, mirroring the shape analyzer's
+    /// `walk_stmts`: one statement's failure poisons only the block that
+    /// contains it. The error is ledgered (GHOST_BAIL fires on the
+    /// plate), the rest of this slice is skipped, and the enclosing walk
+    /// resumes with the next sibling — the scope bracket in the parent
+    /// statement (begin_scope/end_scope around this call) stays balanced
+    /// because we return normally. Message texts are corpus-pinned:
+    /// negative cases grep them on stderr, so keep the prefix verbatim.
+    fn check_block(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            if let Err(msg) = self.check_stmt(stmt) {
+                signal!(trace::TRACE_GHOST_BAIL);
+                self.shape.diagnostics.push(msg);
+                return;
+            }
+        }
     }
 
     fn resolve_all_scopes(&mut self) {
@@ -56,66 +73,67 @@ impl<'a> TypeChecker<'a> {
         self.scopes.pop().expect("Cannot pop global scope");
     }
 
-    fn declare_var(&mut self, name: String, ty: StaticType) {
+    fn declare_var(&mut self, name: String, ty: StaticType) -> Result<(), String> {
         let current_scope = self.scopes.last_mut().unwrap();
         if current_scope.contains_key(&name) {
-            panic!("Variable '{}' already declared in this scope", name);
+            return Err(format!("Variable '{}' already declared in this scope", name));
         }
         current_scope.insert(name, ty);
+        Ok(())
     }
 
-    fn var_type(&self, name: &str) -> StaticType {
+    fn var_type(&self, name: &str) -> Result<StaticType, String> {
         for scope in self.scopes.iter().rev() {
             if let Some(ty) = scope.get(name) {
-                return self.resolve_var(ty);
+                return Ok(self.resolve_var(ty));
             }
         }
-        panic!("Undeclared variable: '{}'", name);
+        Err(format!("Undeclared variable: '{}'", name))
     }
 
-    fn check_stmt(&mut self, stmt: &Stmt) {
+    fn check_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::LocalDecl { names, exprs } => {
                 let mut expr_types = Vec::with_capacity(exprs.len());
                 for expr in exprs {
-                    expr_types.push(self.check_expr(expr));
+                    expr_types.push(self.check_expr(expr)?);
                 }
                 for (name, ty) in names.iter().zip(expr_types) {
-                    self.declare_var(name.clone(), ty);
+                    self.declare_var(name.clone(), ty)?;
                 }
             }
             Stmt::Assignment { name, expr } => {
-                let expected = self.var_type(name);
+                let expected = self.var_type(name)?;
                 if matches!(expr, Expr::Nil) {
                     // [Lifecycle Parity Strike] Records are heap GlmTables
                     // exactly like tables, so they are valid nil-release
                     // targets: the shape layer's sole-ownership proof and
                     // the lowerer's TableFree emission are type-agnostic.
                     if !matches!(expected, StaticType::Table(_) | StaticType::Record(_)) {
-                        panic!(
+                        return Err(format!(
                             "Type Error: 'nil' releases tables — '{}' is a {}",
                             name,
                             type_name(&expected)
-                        );
+                        ));
                     }
-                    return;
+                    return Ok(());
                 }
-                let actual = self.check_expr(expr);
+                let actual = self.check_expr(expr)?;
                 if expected != actual {
                     // Reject reassigning an empty table constructor to a
                     // variable that was initialized with concrete content.
                     // Empty constructors produce Unknown types which only
                     // participate in unification through element access.
                     if is_empty_table_constructor(expr) {
-                        panic!(
+                        return Err(format!(
                             "Type Error: cannot assign {} to variable '{}' of type {}",
                             type_name(&actual),
                             name,
                             type_name(&expected)
-                        );
+                        ));
                     }
                     // Use unification to resolve any Unknown type variables.
-                    self.unify(&expected, &actual);
+                    self.unify(&expected, &actual)?;
                     // Store the resolved type back into the scope.
                     let resolved = self.resolve_var(&actual);
                     for scope in self.scopes.iter_mut().rev() {
@@ -127,16 +145,16 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             Stmt::IndexAssign { obj, key, value } => {
-                let (elem, _obj_desc) = self.check_index_base(obj);
-                let key_ty = self.check_expr(key);
+                let (elem, _obj_desc) = self.check_index_base(obj)?;
+                let key_ty = self.check_expr(key)?;
                 if key_ty != StaticType::Integer {
-                    panic!(
+                    return Err(format!(
                         "Type Error: table index must be an Integer, got {}",
                         type_name(&key_ty)
-                    );
+                    ));
                 }
 
-                let val_ty = self.check_expr(value);
+                let val_ty = self.check_expr(value)?;
 
                 // Strict monomorphism: nested table element types must match recursively.
                 if matches!(elem, StaticType::Table(_)) && matches!(val_ty, StaticType::Table(_)) {
@@ -148,19 +166,17 @@ impl<'a> TypeChecker<'a> {
                         StaticType::Table(inner) => inner.as_ref(),
                         _ => unreachable!(),
                     };
-                    self.unify(expected_inner, actual_inner);
+                    self.unify(expected_inner, actual_inner)?;
                 } else {
                     // Both are non-table types, or there's a scalar vs table conflict
-                    // Unify will naturally typecheck them or throw a clean type conflict panic.
-                    self.unify(&elem, &val_ty);
+                    // Unify will naturally typecheck them or return a clean type conflict error.
+                    self.unify(&elem, &val_ty)?;
                 }
             }
             Stmt::While { condition, body } => {
-                self.check_condition(condition, "while");
+                self.check_condition(condition, "while")?;
                 self.begin_scope();
-                for s in body {
-                    self.check_stmt(s);
-                }
+                self.check_block(body);
                 self.end_scope();
             }
             Stmt::If {
@@ -168,44 +184,40 @@ impl<'a> TypeChecker<'a> {
                 then_body,
                 else_body,
             } => {
-                self.check_condition(condition, "if");
+                self.check_condition(condition, "if")?;
                 self.begin_scope();
-                for s in then_body {
-                    self.check_stmt(s);
-                }
+                self.check_block(then_body);
                 self.end_scope();
                 self.begin_scope();
-                for s in else_body {
-                    self.check_stmt(s);
-                }
+                self.check_block(else_body);
                 self.end_scope();
             }
             Stmt::Do { body } => {
                 self.begin_scope();
-                for s in body {
-                    self.check_stmt(s);
-                }
+                self.check_block(body);
                 self.end_scope();
             }
             Stmt::Print { exprs } => {
                 for e in exprs {
-                    let ty = self.check_expr(e);
+                    let ty = self.check_expr(e)?;
                     if matches!(ty, StaticType::Table(_)) {
-                        panic!(
+                        return Err(
                             "Type Error: cannot print a table — print its cells or '#t' instead"
+                                .to_string(),
                         );
                     }
                 }
             }
         }
+        Ok(())
     }
 
-    fn check_index_base(&mut self, obj: &Expr) -> (StaticType, String) {
-        let ty = self.check_expr(obj);
+    fn check_index_base(&mut self, obj: &Expr) -> Result<(StaticType, String), String> {
+        let ty = self.check_expr(obj)?;
         match ty {
             StaticType::Table(elem) => {
                 let desc = type_name(&StaticType::Table(elem.clone()));
-                (*elem, desc)
+                Ok((*elem, desc))
             }
             StaticType::Record(fields) => {
                 // Records are stored as tables internally — field 0 = first value, etc.
@@ -213,40 +225,42 @@ impl<'a> TypeChecker<'a> {
                 let first_ty = fields.first().map(|(_, ty)| ty.clone())
                     .unwrap_or(StaticType::Integer);
                 let desc = type_name(&StaticType::Table(Box::new(first_ty.clone())));
-                (first_ty, desc)
+                Ok((first_ty, desc))
             }
-            _ => panic!(
+            _ => Err(format!(
                 "Type Error: cannot index {} — only tables support '[]'",
                 type_name(&ty)
-            ),
+            )),
         }
     }
 
-    fn check_condition(&mut self, condition: &Expr, kw: &str) {
-        let ty = self.check_expr(condition);
+    fn check_condition(&mut self, condition: &Expr, kw: &str) -> Result<(), String> {
+        let ty = self.check_expr(condition)?;
         if ty != StaticType::Boolean {
-            panic!(
+            return Err(format!(
                 "Type Error: '{}' condition must be a Boolean, got {}",
                 kw,
                 type_name(&ty)
-            );
+            ));
         }
+        Ok(())
     }
 
-    fn check_expr(&mut self, expr: &Expr) -> StaticType {
+    fn check_expr(&mut self, expr: &Expr) -> Result<StaticType, String> {
         match expr {
-            Expr::Integer(_) => StaticType::Integer,
-            Expr::Float(_) => StaticType::Float,
-            Expr::Boolean(_) => StaticType::Boolean,
-            Expr::String(_) => StaticType::String,
-            Expr::Nil => panic!(
+            Expr::Integer(_) => Ok(StaticType::Integer),
+            Expr::Float(_) => Ok(StaticType::Float),
+            Expr::Boolean(_) => Ok(StaticType::Boolean),
+            Expr::String(_) => Ok(StaticType::String),
+            Expr::Nil => Err(
                 "Type Error: 'nil' is only valid as the right-hand side of 't = nil' — \
                  it releases a table's memory, it is not a value"
+                    .to_string(),
             ),
             Expr::TableCtor(elems) => {
                 let elem = self.shape.elem_of(expr);
                 for e in elems {
-                    let ty = self.check_expr(e);
+                    let ty = self.check_expr(e)?;
                     // Allow nested table types — the runtime supports deep-free.
                     if matches!(elem, StaticType::Table(_)) && matches!(ty, StaticType::Table(_)) {
                         // Both are tables — compare their resolved inner types.
@@ -259,53 +273,53 @@ impl<'a> TypeChecker<'a> {
                             _ => unreachable!(),
                         };
                         if expected_inner != actual_inner {
-                            self.unify(expected_inner, actual_inner);
+                            self.unify(expected_inner, actual_inner)?;
                         }
                     } else if ty != elem {
-                        panic!(
+                        return Err(format!(
                             "Type Error: mixed table constructor elements — {} after {}",
                             type_name(&ty),
                             type_name(&elem)
-                        );
+                        ));
                     }
                 }
-                StaticType::Table(Box::new(elem))
+                Ok(StaticType::Table(Box::new(elem)))
             }
             Expr::RecordCtor(fields) => {
                 let mut record_types: Vec<(String, StaticType)> = Vec::with_capacity(fields.len());
                 for (name, val_expr) in fields.iter() {
-                    let val_ty = self.check_expr(val_expr);
+                    let val_ty = self.check_expr(val_expr)?;
                     record_types.push((name.to_string(), val_ty));
                 }
-                StaticType::Record(record_types)
+                Ok(StaticType::Record(record_types))
             }
             Expr::Index { obj, key } => {
-                let (elem, _) = self.check_index_base(obj);
-                let key_ty = self.check_expr(key);
+                let (elem, _) = self.check_index_base(obj)?;
+                let key_ty = self.check_expr(key)?;
                 if key_ty != StaticType::Integer {
-                    panic!(
+                    return Err(format!(
                         "Type Error: table index must be an Integer, got {}",
                         type_name(&key_ty)
-                    );
+                    ));
                 }
-                elem
+                Ok(elem)
             }
             Expr::Identifier(name) => self.var_type(name),
             Expr::BinaryOp { op, left, right } => {
-                let l = self.check_expr(left);
-                let r = self.check_expr(right);
+                let l = self.check_expr(left)?;
+                let r = self.check_expr(right)?;
                 match op {
                     BinOp::And | BinOp::Or => {
                         if l == StaticType::Boolean && r == StaticType::Boolean {
-                            StaticType::Boolean
+                            Ok(StaticType::Boolean)
                         } else {
-                            panic!(
+                            Err(format!(
                                 "Type Error: '{}' requires Boolean operands on both sides",
                                 match op {
                                     BinOp::And => "and",
                                     _ => "or",
                                 }
-                            )
+                            ))
                         }
                     }
                     BinOp::Add
@@ -315,15 +329,15 @@ impl<'a> TypeChecker<'a> {
                     | BinOp::IntDiv
                     | BinOp::Mod => self.numeric_operand(&l, &r, op),
                     BinOp::LessThan | BinOp::GreaterThan | BinOp::LessEq | BinOp::GreaterEq => {
-                        self.numeric_operand(&l, &r, op);
-                        StaticType::Boolean
+                        self.numeric_operand(&l, &r, op)?;
+                        Ok(StaticType::Boolean)
                     }
                     BinOp::Equal | BinOp::NotEqual => {
                         if l == StaticType::String || r == StaticType::String {
-                            panic!("Type Error: String comparison is not supported yet");
+                            return Err("Type Error: String comparison is not supported yet".to_string());
                         }
                         if !types_compatible(&l, &r) {
-                            panic!(
+                            return Err(format!(
                                 "Type Error: '{}' compares {} with {}",
                                 match op {
                                     BinOp::Equal => "==",
@@ -331,50 +345,55 @@ impl<'a> TypeChecker<'a> {
                                 },
                                 type_name(&l),
                                 type_name(&r)
-                            );
+                            ));
                         }
-                        StaticType::Boolean
+                        Ok(StaticType::Boolean)
                     }
                 }
             }
             Expr::UnaryOp { op, expr } => {
-                let t = self.check_expr(expr);
+                let t = self.check_expr(expr)?;
                 match op {
                     UnOp::Neg => match t {
-                        StaticType::Integer | StaticType::Float => t,
-                        _ => panic!("Type Error: unary '-' requires a numeric operand"),
+                        StaticType::Integer | StaticType::Float => Ok(t),
+                        _ => Err("Type Error: unary '-' requires a numeric operand".to_string()),
                     },
                     UnOp::Not => match t {
-                        StaticType::Boolean => StaticType::Boolean,
-                        _ => panic!("Type Error: 'not' requires a Boolean operand"),
+                        StaticType::Boolean => Ok(StaticType::Boolean),
+                        _ => Err("Type Error: 'not' requires a Boolean operand".to_string()),
                     },
                     UnOp::Len => match self.resolve_var(&t) {
-                        StaticType::Table(_) => StaticType::Integer,
-                        _ => panic!(
+                        StaticType::Table(_) => Ok(StaticType::Integer),
+                        _ => Err(format!(
                             "Type Error: '#' requires a table operand, got {}",
                             type_name(&t)
-                        ),
+                        )),
                     },
                 }
             }
-            Expr::SysAllocCount => StaticType::Integer,
+            Expr::SysAllocCount => Ok(StaticType::Integer),
         }
     }
 
-    fn numeric_operand(&self, l: &StaticType, r: &StaticType, op: &BinOp) -> StaticType {
+    fn numeric_operand(
+        &self,
+        l: &StaticType,
+        r: &StaticType,
+        op: &BinOp,
+    ) -> Result<StaticType, String> {
         match (l, r) {
-            (StaticType::Integer, StaticType::Integer) => StaticType::Integer,
-            (StaticType::Float, StaticType::Float) => StaticType::Float,
+            (StaticType::Integer, StaticType::Integer) => Ok(StaticType::Integer),
+            (StaticType::Float, StaticType::Float) => Ok(StaticType::Float),
             (StaticType::Integer, StaticType::Float) | (StaticType::Float, StaticType::Integer) => {
-                panic!(
+                Err(format!(
                     "Type Error: '{}' does not support mixed Integer and Float operands",
                     bin_op_name(op)
-                )
+                ))
             }
-            _ => panic!(
+            _ => Err(format!(
                 "Type Error: '{}' requires numeric operands",
                 bin_op_name(op)
-            ),
+            )),
         }
     }
 }
@@ -400,15 +419,16 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn unify(&mut self, expected: &StaticType, actual: &StaticType) {
+    fn unify(&mut self, expected: &StaticType, actual: &StaticType) -> Result<(), String> {
         match (expected, actual) {
             // Same type — trivially unify.
-            (a, b) if a == b => (),
+            (a, b) if a == b => Ok(()),
 
             // Both Unknown — bind the second to the first (if different IDs).
             (StaticType::Unknown(id_a), StaticType::Unknown(id_b)) if id_a != id_b => {
                 self.substitutions
                     .insert(*id_b, StaticType::Unknown(*id_a));
+                Ok(())
             }
 
             // Bind the Unknown to the concrete type.
@@ -419,23 +439,22 @@ impl<'a> TypeChecker<'a> {
                     _ => unreachable!(),
                 };
                 self.substitutions.insert(u_id, c_ty);
+                Ok(())
             }
 
             // Both tables — recursively unify element types.
             (StaticType::Table(e1), StaticType::Table(e2)) => {
                 let e1 = self.resolve_var(e1);
                 let e2 = self.resolve_var(e2);
-                self.unify(&e1, &e2);
+                self.unify(&e1, &e2)
             }
 
             // Type conflict.
-            _ => {
-                panic!(
-                    "Type Error: type conflict — {} vs {}",
-                    type_name(expected),
-                    type_name(actual)
-                );
-            }
+            _ => Err(format!(
+                "Type Error: type conflict — {} vs {}",
+                type_name(expected),
+                type_name(actual)
+            )),
         }
     }
 }

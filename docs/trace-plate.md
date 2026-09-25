@@ -8,9 +8,9 @@ to change it ad hoc.
 
 ## CONTEXT (verified state of the representation)
 
-One file, ./.glm_trace.bin, 256 bytes, one byte per slot, slot index ==
-byte offset (so `xxd -a .glm_trace.bin` reads it straight from the shell).
-The file is never truncated and lives per working directory. Two halves:
+One file, ./.glm_trace.bin, slot index == byte offset for the classic
+plate (so `xxd -a .glm_trace.bin` reads it straight from the shell). The
+file is never truncated and lives per working directory. Sections:
 
 - LOW half, bytes 0..128 — sticky signal booleans. Written ONLY by
   constant-1 stores: compiler via `compiler_trace_set` (src/trace.rs),
@@ -20,43 +20,49 @@ The file is never truncated and lives per working directory. Two halves:
 - HIGH half, bytes 128..256 — per-run counter mirror. Byte 128+N counts
   trigger N in the MOST RECENT compile. Zeroed at compiler startup by
   `compiler_trace_reset_counts` (pass A, first statement of main), then
-  incremented by `compiler_trace_count` with a saturating read-modify-write
-  (pass B) — 255 means "many", it must never wrap.
+  incremented with a saturating read-modify-write — 255 means "many", it
+  must never wrap.
+- SCOPE HISTOGRAM, bytes 256..33024 — per-run signal × scope matrix.
+  Cell (signal N, scope S) at byte 256 + N*256 + S counts how often
+  signal N fired inside scope S this run, saturating independently at
+  255. Zeroed at startup by `compiler_trace_scope_reset` (pass A).
+- SCOPE DIRECTORY, bytes 33024..33536 — two bytes per scope id:
+  (depth, parent) at 33024 + S*2; parent 0xFF = none; an all-zero entry
+  means the scope was never seen this run. The root scope is (0, 0xFF).
 
-Slot ownership (do not renumber, do not double-book):
+## SIGNALS (single source of truth)
 
-| Slots      | Owner    | Meaning |
-|------------|----------|---------|
-| 0, 1       | compiler | compiled ok / build failed (EXPECT_BUILD_FAIL) |
-| 10, 11     | analyzer | BIND_SCALAR / BIND_HEAP |
-| 20         | analyzer | SHAPE_DROP |
-| 21         | analyzer | SHAPE_CONFLICT_GUARD (elem_type_of_tbl Conflict guard) |
-| 22         | analyzer | RECORD_PRESERVED (Record beats child_sites fast path) |
-| 23         | analyzer | CHILD_FAST_PATH (multi-child coherence fast path) |
-| 24         | analyzer | FALLBACK_RESOLVE (final match fallback) |
-| 25         | analyzer | DECIDE_VISIT (decide() entered) |
-| 26         | analyzer | JOIN_RETYPED (join_ty actually moved the type) |
-| 30         | backend  | OFFLOAD_EMIT |
-| 80         | analyzer | FAIL_ALIAS_UNION |
-| 81         | backend  | FAIL_TYPE_CONFUSION |
-| 50,60,70,90| runtime  | RT_ALLOC / RT_FREE / RT_SPARSE_UPGRADE / LEAK |
-| 27-29, 31-49, 51-59, 61-69, 71-79, 82-89, 91-127 | free | allocate here |
+Slot names, numbers, owners, and meanings live in ONE place:
+trace_signals.txt (repo root). Grammar, one signal per line:
 
-Counting coverage: analyzer signals (everything through `Analyzer::trace`)
-are set+counted together. Backend (30, 81) and runtime (50, 60, 70, 90)
-pokes are boolean-only today — counter 0 does not prove "never fired" for
+    <slot> <NAME> <owner> <meaning>
+
+build.rs parses it at compile time and generates the `TRACE_*` consts
+that src/trace.rs includes — a duplicate slot or name fails the build.
+plate.py parses the same file to decode the plate, so decoder and
+compiler cannot drift. To add a signal: append one line on an unused
+slot, poke it through the existing helpers. Nothing else to maintain.
+
+Counting coverage: analyzer signals (every gated
+`signal!(self.recording, …)` poke) are set+counted+scope-tagged together.
+Backend (30, 81) and runtime (50, 60, 70, 90) pokes are boolean-only
+today — counter 0 and empty scope cells do not prove "never fired" for
 those slots.
 
 ## INVARIANTS (the contract)
 
-1. Slot index == byte offset, 256 bytes total. `set_len` may only grow the
-   file to 256; never truncate, never create a fresh file to "reset" —
-   accumulation is a feature, the counters are the per-run view.
+1. Slot index == byte offset for the classic plate; sections append after
+   byte 256 (geometry in CONTEXT). `set_len` may only grow the file to its
+   full 33536 bytes — set_len back to 256 would TRUNCATE the scope
+   sections; never truncate, never create a fresh file to "reset" —
+   accumulation is a feature, the counters and scope sections are the
+   per-run view.
 2. LOW half: constant-1 stores only. No arithmetic, no read-modify-write,
    no compiler-side clears. Slots 0/1 keep their build-status meaning.
-3. HIGH half: compiler-owned. Pass A zeroing happens before any poke.
+3. HIGH half and scope sections: compiler-owned. Pass A zeroing happens
+   before any poke (counters, then scope histogram + directory).
    Increments saturate at 255; changing saturating_add to wrapping add is
-   a bug, not a fix. The runtime must never write bytes 128..256.
+   a bug, not a fix. The runtime must never write bytes 128..33536.
 4. One compiler instance per plate at a time. The counter increment is a
    non-atomic read-modify-write; two concurrent compiles in one CWD lose
    counts (booleans survive — constant stores are race-safe — counters do
@@ -65,13 +71,22 @@ those slots.
 5. Analyzer pokes fire only when `self.recording` is true (the final
    post-fixpoint walk). Ungated pokes let the fixed-point loop inflate
    counts and will silently corrupt the shadow.
-6. New signals: unused slots only, named constants in src/trace.rs, and
-   poke through the existing helpers (`self.trace` in the analyzer) so
-   gating and counting stay in one choke point.
+6. New signals: unused slots only, one line in trace_signals.txt (the
+   build generates the consts and fails on collisions), and poke through
+   the existing gated `signal!(self.recording, …)` sites so gating,
+   counting, and scope tagging stay in one choke point.
 7. Counting must never perturb codegen. The llvm/lock/ byte-identity gate
    is part of this contract, not an optional extra.
 8. Determinism everywhere: BTreeMap/BTreeSet in the pipeline; never revert
    to hashed collections.
+9. Scope context is recorded only during the final recording walk: block
+   scopes (do / if branches / while body) get stable ids via the analyzer's
+   scope_id() (deterministic first-visit order, root = 0, the While
+   fixpoint reuses its body's id via the key map), and pokes pair with the
+   register set by enter_scope/exit_scope. Ungated walks must never touch
+   the register.
+10. Scope ids beyond 254 fold into 255 (u8 plate limit — small scripts);
+    widening it is a deliberate representation change, not a drive-by.
 
 ## FAILURE MODES TO GUARD AGAINST
 
@@ -89,6 +104,10 @@ those slots.
   in the plate is a deliberate semantics change, not a drive-by.
 - A poke outside the recording gate; a new signal colliding with a used
   slot; reverting BTree collections.
+- Shrinking `set_len` back to 256 — it truncates the scope sections. The
+  trace helpers only ever grow the file to its full length.
+- Writing the scope register outside enter_scope/exit_scope, or during an
+  ungated walk — silently misattributes WHERE a signal fired.
 
 ## DECODING RULES (how to read a plate)
 
@@ -98,6 +117,14 @@ those slots.
   (backend 30/81, runtime 50/60/70/90) this run, or in some earlier run
   (sticky residue). For analyzer slots this is how you tell "not this
   case" from "reachable in this corpus".
+- Scope cell (N, S) = k > 0 → signal N fired k times inside scope S this
+  run (or "many" at 255); a signal's run total is the sum of its cells.
+  Scope S exists this run iff its directory entry at 33024 + 2*S is not
+  (0,0); the root is (0, 0xFF) and the directory doubles as the scope
+  tree for the decoder.
+- Scope drift: decode two runs of the same case and diff — the first
+  diverging (signal, scope) cell localizes the behavior change; a changed
+  directory entry means the scope structure itself moved.
 - Two compiles of the same case must produce byte-identical plates. A
   difference is a determinism regression — treat it like lock drift.
 
@@ -109,7 +136,9 @@ those slots.
    28/28 negative, 47/47 lock byte-identity.
 3. Manual plate check from the repo root: snapshot `xxd -a .glm_trace.bin`,
    compile one case (e.g. glm/cases/nested_homogeneous.lua) twice; the two
-   post-compile snapshots must be byte-identical (counters reset per run),
-   and the diff against the pre-compile snapshot must touch only bytes
-   128..256 (sticky half unperturbed). Spot-check the implication
-   `counter > 0 ⇒ boolean == 1` on every nonzero counter byte.
+   post-compile snapshots must be byte-identical across the full 33536
+   bytes (counters and scope sections reset per run), and the diff against
+   the pre-compile snapshot must touch only bytes 128..33536 (sticky half
+   unperturbed). Spot-check the implication `counter > 0 ⇒ boolean == 1`
+   on every nonzero counter byte, and `scope cell > 0 ⇒ boolean == 1`
+   likewise (`python3 plate.py` runs these contract checks for you).

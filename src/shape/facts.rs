@@ -11,6 +11,10 @@ pub struct ShapeFacts {
     pub free_sites: BTreeSet<*const Stmt>,
     pub name_dense: BTreeMap<(String, usize), bool>,
     pub substitutions: BTreeMap<usize, StaticType>,
+    /// Localized shape errors from the ghost run: the walk completed and
+    /// the plate is whole, but these blocks were poisoned and skipped.
+    /// Non-empty means the compile must fail; the driver reports them.
+    pub diagnostics: Vec<String>,
 }
 
 impl ShapeFacts {

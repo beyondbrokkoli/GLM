@@ -1,6 +1,6 @@
 -- EXPECT_BUILD_FAIL: records compile as tables, cannot be printed directly
--- BS-6: print(r) passes the checker (the print gate rejects Table(_)
--- only) and panics the backend's unreachable Record arm
--- (backend.rs:520). A compiler panic, pinned as a build failure.
+-- Gate 4: print(r) passes the checker (the print gate rejects Table(_)
+-- only) and is rejected by the backend's ledgered error recovery —
+-- a graceful build failure, no compiler panic.
 local r = { x: 1, name: "a" }
 print(r)

@@ -10,3 +10,6 @@ __pycache__/
 glm_runtime_fuzz
 .zcode/plans
 .glm_trace.bin
+.glm_rt_trace.bin
+/docs/skills
+/test.lua

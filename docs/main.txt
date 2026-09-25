@@ -1,2 +1,18 @@
 Binary entry point: declares the compiler module tree and runs the
-lexer → parser → type check → shape analysis → lowering → codegen pipeline.
+strictly-ordered gated pipeline:
+lexer → parser → GATE 0 → shape::analyze → GATE 1 → TypeChecker →
+GATE 2 → Lowerer → backend → out.ll → clang.
+
+Every gate consumes its pass's diagnostics ledger (never the return
+channel): print each entry to stderr, poke TRACE_BUILD_FAIL (slot 1),
+print the "GLM_TRACE: slot 1 — build failed (EXPECT_BUILD_FAIL)" marker,
+exit(1) — no panic, so the trace plate survives whole for plate.py. Each
+gate only runs when the previous ledger is empty. Gate 0 covers the
+front-end: lexer errors and parse errors land in one `front_diagnostics`
+ledger before `build_context`.
+
+The panic hook stays as the residual catch-all (backend tripwires, clang
+failure): pokes slot 1, prints the marker, chains the default hook so
+stderr keeps its exact corpus-pinned format. Trace-plate protocol:
+compiler_trace_reset_counts + compiler_trace_scope_reset at startup
+(per-run view), compiler owns bytes >= 128, runtime never writes them.

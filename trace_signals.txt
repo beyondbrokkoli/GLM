@@ -1,0 +1,140 @@
+# trace_signals.txt — SINGLE SOURCE OF TRUTH for trace-plate signals.
+#
+# Every consumer agrees on this file:
+#   build.rs parses it and generates the `pub const TRACE_*` items compiled
+#   into src/trace.rs (duplicate slot or name = build error);
+#   plate.py parses the same file to decode .glm_trace.bin.
+# To add a signal: append one line on an unused slot, then poke it through
+# the existing helpers. Never renumber, never double-book — the build fails.
+#
+# Grammar, one signal per line (blank lines and `#` lines are ignored):
+#
+#   <slot> <NAME> <owner> <meaning>
+#
+#   slot    0..=127, unique — the high half (128..256) is the per-run
+#           counter mirror byte 128+N, not a slot namespace
+#   NAME    A-Z 0-9 and _, unique; becomes TRACE_<NAME> in Rust
+#   owner   single token: the subsystem that pokes it
+#           (compiler, analyzer, backend, runtime)
+#   meaning rest of line, verbatim
+#
+# Plate contract (docs/trace-plate.md): 256-byte classic plate — LOW half
+# sticky booleans, HIGH half saturating per-run counters — plus the scope
+# sections appended after byte 256.
+
+0   COMPILED               compiler  compiled ok
+1   BUILD_FAIL             compiler  build failed (EXPECT_BUILD_FAIL)
+
+10  BIND_SCALAR            analyzer  scalar binding
+11  BIND_HEAP              analyzer  heap binding
+
+12  CHK_TBL_IDENT          analyzer  check_table_use: ident
+13  CHK_TBL_NIL            analyzer  check_table_use: nil check
+14  CHK_USE_TBL            analyzer  check_uses: table
+15  CHK_USE_REC            analyzer  check_uses: record
+16  CHK_USE_IDX            analyzer  check_uses: index
+17  CHK_USE_UNOP_LEN       analyzer  check_uses: unop len
+18  CHK_USE_BINOP          analyzer  check_uses: binop
+19  FILL_LOOP_DENSE        analyzer  detect_fill_loop: dense set
+
+20  SHAPE_DROP             analyzer  shape dropped
+21  SHAPE_CONFLICT_GUARD   analyzer  elem_type_of_tbl: Conflict guard
+22  RECORD_PRESERVED       analyzer  Record beats child_sites fast path
+23  CHILD_FAST_PATH        analyzer  multi-child coherence fast path
+24  FALLBACK_RESOLVE       analyzer  final match fallback
+25  DECIDE_VISIT           analyzer  decide() entered
+26  JOIN_RETYPED           analyzer  join_ty actually moved the type
+27  ANALYZE_MISSING_VALUE  analyzer  analyze: uninitialized table read
+28  ANALYZE_PENDING        analyzer  analyze: site is pending
+29  ANALYZE_RESOLVED       analyzer  analyze: site is resolved
+
+30  OFFLOAD_EMIT           backend   offload emit
+
+31  STMT_ASSIGN_NIL        analyzer  walk_stmt: assign nil
+32  STMT_ASSIGN_TBL        analyzer  walk_stmt: assign table
+33  STMT_ASSIGN_TBL_VALID  analyzer  walk_stmt: assign table valid alias
+34  STMT_ASSIGN_TBL_SCALAR analyzer  walk_stmt: assign table scalar incoming
+35  STMT_ASSIGN_TBL_SCALAR_VALID analyzer walk_stmt: assign table scalar valid alias
+36  STMT_ASSIGN_RESOLVED   analyzer  walk_stmt: assign resolved
+37  STMT_IDX_NESTED        analyzer  walk_stmt: index assign nested
+38  STMT_IDX_BASE_TBL      analyzer  walk_stmt: index assign base tbl
+39  STMT_IDX_VALID_ALIAS   analyzer  walk_stmt: index assign valid alias
+40  STMT_IDX_CHECK_THRESH  analyzer  walk_stmt: index assign check thresh
+41  STMT_WHILE_FILL        analyzer  walk_stmt: while fill loop detected
+42  STMT_WHILE_STABLE      analyzer  walk_stmt: while scope stable
+43  STMT_IF                analyzer  walk_stmt: if statement
+44  STMT_DO                analyzer  walk_stmt: do statement
+45  STMT_PRINT             analyzer  walk_stmt: print statement
+46  MUT_ASSIGN             analyzer  collect_mutated_names: assign
+47  MUT_IF                 analyzer  collect_mutated_names: if stmt
+48  MUT_THEN_ASSIGN        analyzer  collect_mutated_names: then assign
+49  MUT_ELSE_ASSIGN        analyzer  collect_mutated_names: else assign
+
+50  RT_ALLOC               runtime   runtime table allocation
+
+51  TY_STATIC_INT          analyzer  ty_to_static: int
+52  TY_STATIC_PENDING      analyzer  ty_to_static: pending
+53  TY_STATIC_FLT          analyzer  ty_to_static: float
+54  TY_STATIC_BOOL         analyzer  ty_to_static: bool
+55  TY_STATIC_STR          analyzer  ty_to_static: str
+56  TY_STATIC_TBL          analyzer  ty_to_static: table
+57  TY_STATIC_REC          analyzer  ty_to_static: record
+58  TY_STATIC_CONFLICT     analyzer  ty_to_static: conflict
+59  RESOLVE_FOUND          analyzer  resolve: reference found
+
+60  RT_FREE                runtime   runtime table free
+
+61  THRESH_INT             analyzer  check_key_threshold: int key
+62  THRESH_BOUNDS          analyzer  check_key_threshold: bounds limit
+63  THRESH_SPARSE          analyzer  check_key_threshold: sparse limit
+64  THRESH_SPARSE_ALIAS    analyzer  check_key_threshold: sparse alias
+65  DECIDE_CONFLICT        analyzer  decide: site conflict
+66  DECIDE_UPDATE          analyzer  decide: update scope alias
+67  DECIDE_UPDATE_CHANGED  analyzer  decide: update scope changed
+68  GHOST_BAIL             analyzer  walk_stmts: ghost bail — block poisoned, skipped; siblings continue
+69  GHOST_BAIL_PARSER      parser    parse_program: ghost bail — syntax error, skipping rest of file
+
+70  RT_SPARSE_UPGRADE      runtime   runtime sparse table upgrade
+
+72  GHOST_BAIL_LOWERER     lowerer   lower_program: ghost bail — lower error, skipping rest of file
+
+80  FAIL_ALIAS_UNION       analyzer  fail: alias union
+81  FAIL_TYPE_CONFUSION    backend   fail: type confusion
+
+90  FAIL_LEAK_DETECTED     runtime   runtime leak detected
+
+91  ELEM_CHILD_CONFLICT    analyzer  elem_type_of_tbl: child conflict
+92  ELEM_CHILD_FIRST       analyzer  elem_type_of_tbl: child uniform type initial
+93  ELEM_CHILD_MISMATCH    analyzer  elem_type_of_tbl: child uniform mismatch
+94  ELEM_CHILD_MATCH       analyzer  elem_type_of_tbl: child uniform match
+95  ELEM_CHILD_UNIFORM     analyzer  elem_type_of_tbl: uniform type resolved
+96  ELEM_FALLBACK_TBL      analyzer  elem_type_of_tbl: fallback table
+97  ELEM_FALLBACK_REC      analyzer  elem_type_of_tbl: fallback record
+98  ELEM_FALLBACK_INT      analyzer  elem_type_of_tbl: fallback int
+99  ELEM_FALLBACK_FLT      analyzer  elem_type_of_tbl: fallback float
+100 ELEM_FALLBACK_BOOL     analyzer  elem_type_of_tbl: fallback bool
+101 ELEM_FALLBACK_STR      analyzer  elem_type_of_tbl: fallback string
+102 ELEM_FALLBACK_CONFLICT analyzer  elem_type_of_tbl: fallback conflict
+103 INFER_INT              analyzer  infer_expr: int
+104 INFER_FLT              analyzer  infer_expr: float
+105 INFER_BOOL             analyzer  infer_expr: bool
+106 INFER_STR              analyzer  infer_expr: string
+107 INFER_NIL              analyzer  infer_expr: nil
+108 INFER_TBL_CHILD        analyzer  infer_expr: table child matched
+109 INFER_TBL_FIRST        analyzer  infer_expr: table first element
+110 INFER_TBL_MISMATCH     analyzer  infer_expr: table element mismatch
+111 INFER_TBL_CONFLICT     analyzer  infer_expr: table conflict flag set
+112 INFER_TBL_MATCH        analyzer  infer_expr: table element match
+113 INFER_TBL_RESOLVED     analyzer  infer_expr: table resolved
+114 INFER_TBL_PENDING      analyzer  infer_expr: table pending
+115 INFER_REC_CHILD        analyzer  infer_expr: record child matched
+116 INFER_IDX_BAD_KEY      analyzer  infer_expr: index bad key type
+117 INFER_IDX_BAD_OBJ      analyzer  infer_expr: index bad obj type
+118 INFER_IDX_VALID        analyzer  infer_expr: index valid alias
+119 INFER_IDENT            analyzer  infer_expr: identifier
+120 INFER_BINOP_ARITH      analyzer  infer_expr: binop arithmetic
+121 INFER_BINOP_OTHER      analyzer  infer_expr: binop other
+122 INFER_UNOP_NEG         analyzer  infer_expr: unop neg
+123 INFER_UNOP_NOT         analyzer  infer_expr: unop not
+124 INFER_UNOP_LEN         analyzer  infer_expr: unop len
+125 INFER_SYSALLOC         analyzer  infer_expr: sys alloc count

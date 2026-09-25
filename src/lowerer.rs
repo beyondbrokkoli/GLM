@@ -5,6 +5,11 @@ use crate::ir::{BasicBlock, BlockId, Instruction, IrProgram, RegId, Terminator};
 use crate::shape::{LayoutVerdict, ShapeFacts};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A localized lowering failure: one user-facing message, created at the
+/// detection site and ledgered at `lower_program`. Ghost run contract —
+/// never a panic.
+pub struct LowerError(pub String);
+
 #[derive(Clone)]
 struct Local {
     reg: RegId,
@@ -20,6 +25,9 @@ struct LoopCtx {
 
 pub struct IrLowerer<'a> {
     pub blocks: Vec<BasicBlock>,
+    /// Ghost-run ledger: one entry per localized failure. The driver
+    /// reports these and fails the build instead of aborting mid-compile.
+    pub diagnostics: Vec<String>,
     current_block: BlockId,
     free_reg: RegId,
     scopes: Vec<BTreeMap<String, Local>>,
@@ -31,6 +39,7 @@ impl<'a> IrLowerer<'a> {
     pub fn new(shape: &'a ShapeFacts) -> Self {
         Self {
             blocks: vec![BasicBlock::new(0)],
+            diagnostics: Vec::new(),
             current_block: 0,
             free_reg: 0,
             scopes: vec![BTreeMap::new()],
@@ -66,25 +75,31 @@ impl<'a> IrLowerer<'a> {
             .insert(name, Local { reg, ty, layout });
     }
 
-    fn update_var(&mut self, name: &str, reg: RegId, ty: StaticType, layout: LayoutVerdict) {
+    fn update_var(
+        &mut self,
+        name: &str,
+        reg: RegId,
+        ty: StaticType,
+        layout: LayoutVerdict,
+    ) -> Result<(), LowerError> {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(local) = scope.get_mut(name) {
                 local.reg = reg;
                 local.ty = ty;
                 local.layout = layout;
-                return;
+                return Ok(());
             }
         }
-        panic!("Lowerer: Undeclared variable");
+        Err(LowerError("Lower Error: Undeclared variable".into()))
     }
 
-    fn read_var(&self, name: &str) -> Local {
+    fn read_var(&self, name: &str) -> Result<Local, LowerError> {
         for scope in self.scopes.iter().rev() {
             if let Some(local) = scope.get(name) {
-                return local.clone();
+                return Ok(local.clone());
             }
         }
-        panic!("Lowerer: Undeclared variable");
+        Err(LowerError("Lower Error: Undeclared variable".into()))
     }
 
     fn has_var(&self, name: &str) -> bool {
@@ -96,26 +111,46 @@ impl<'a> IrLowerer<'a> {
         false
     }
 
-    pub fn lower_program(mut self, stmts: &[Stmt]) -> IrProgram {
+    pub fn lower_program(&mut self, stmts: &[Stmt]) -> IrProgram {
         for stmt in stmts {
-            self.lower_stmt(stmt);
+            match self.lower_stmt(stmt) {
+                Ok(_) => {}
+                Err(e) => {
+                    self.diagnostics.push(e.0);
+                    // Ghost run: bail the rest of the file on the first
+                    // lowering error — a poisoned block leaves half-built
+                    // SSA (dangling jumps, missing phis), so siblings cannot
+                    // resume. lower_program is the file's root block, so the
+                    // bail is scope-tagged (scope 0, depth 0, no parent)
+                    // exactly like the parser's GHOST_BAIL_PARSER.
+                    glm_rt::trace::compiler_trace_current_scope(
+                        0,
+                        0,
+                        glm_rt::trace::TRACE_SCOPE_PARENT_NONE,
+                    );
+                    glm_rt::trace::compiler_trace_signal(
+                        glm_rt::trace::TRACE_GHOST_BAIL_LOWERER,
+                    );
+                    break;
+                }
+            }
         }
         if self.blocks[self.current_block].terminator.is_none() {
             self.terminate(Terminator::Halt);
         }
         IrProgram {
-            blocks: self.blocks,
+            blocks: std::mem::take(&mut self.blocks),
         }
     }
 
-    fn lower_stmt(&mut self, stmt: &Stmt) {
+    fn lower_stmt(&mut self, stmt: &Stmt) -> Result<(), LowerError> {
         match stmt {
             Stmt::LocalDecl { names, exprs } => {
                 let mut bindings = Vec::with_capacity(exprs.len());
                 for expr in exprs {
                     let target_reg = self.next_reg();
-                    let (_, ty) = self.lower_expr(expr, Some(target_reg));
-                    let layout = self.lookup_layout_for(expr);
+                    let (_, ty) = self.lower_expr(expr, Some(target_reg))?;
+                    let layout = self.lookup_layout_for(expr)?;
                     bindings.push((target_reg, ty, layout));
                 }
                 for (name, (reg, ty, layout)) in names.iter().zip(bindings) {
@@ -124,23 +159,23 @@ impl<'a> IrLowerer<'a> {
             }
             Stmt::Assignment { name, expr } => {
                 if matches!(expr, Expr::Nil) {
-                    let local = self.read_var(name);
+                    let local = self.read_var(name)?;
                     if self.shape.is_free(stmt) {
                         self.emit(Instruction::TableFree { table: local.reg });
                     }
                     let null_reg = self.next_reg();
                     self.emit(Instruction::LoadNull { target: null_reg });
-                    self.update_var(name, null_reg, local.ty.clone(), local.layout);
-                    return;
+                    self.update_var(name, null_reg, local.ty.clone(), local.layout)?;
+                    return Ok(());
                 }
                 let new_reg = self.next_reg();
-                let (actual_reg, ty) = self.lower_expr(expr, Some(new_reg));
-                let layout = self.lookup_layout_for(expr);
-                self.update_var(name, actual_reg, ty, layout);
+                let (actual_reg, ty) = self.lower_expr(expr, Some(new_reg))?;
+                let layout = self.lookup_layout_for(expr)?;
+                self.update_var(name, actual_reg, ty, layout)?;
             }
             Stmt::IndexAssign { obj, key, value } => {
-                let (t_reg, _) = self.lower_expr(obj, None);
-                let (i_reg, _) = self.lower_expr(key, None);
+                let (t_reg, _) = self.lower_expr(obj, None)?;
+                let (i_reg, _) = self.lower_expr(key, None)?;
 
                 let base_name = get_base_identifier(obj);
 
@@ -163,11 +198,11 @@ impl<'a> IrLowerer<'a> {
                     }
                 }
 
-                let (v_reg, _) = self.lower_expr(value, None);
+                let (v_reg, _) = self.lower_expr(value, None)?;
 
                 if fast {
                     // Safe layout lookup — falls back recursively for Expr::Index
-                    let layout = self.lookup_layout_for(obj);
+                    let layout = self.lookup_layout_for(obj)?;
                     self.emit(Instruction::TableSetFast {
                         table: t_reg,
                         index: i_reg,
@@ -215,10 +250,10 @@ impl<'a> IrLowerer<'a> {
                     .iter()
                     .filter(|name| self.has_var(name))
                     .map(|name| {
-                        let local = self.read_var(name);
-                        (name.clone(), local)
+                        let local = self.read_var(name)?;
+                        Ok((name.clone(), local))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, LowerError>>()?;
                 phi_order.sort_by(|(name_a, a), (name_b, b)| (a.reg, name_a).cmp(&(b.reg, name_b)));
 
                 let conv: Option<(String, Vec<String>, BTreeSet<String>)> = match condition {
@@ -269,11 +304,11 @@ impl<'a> IrLowerer<'a> {
                 let mut conv_bound_reg: Option<RegId> = None;
                 if let (Some((_, names, _)), Some(bound_expr)) = (&conv, conv_bound) {
                     let saved_scopes = self.scopes.clone();
-                    let (b_reg, _) = self.lower_expr(bound_expr, None);
+                    let (b_reg, _) = self.lower_expr(bound_expr, None)?;
                     self.scopes = saved_scopes;
                     conv_bound_reg = Some(b_reg);
                     for name in names {
-                        let t_reg = self.read_var(name).reg;
+                        let t_reg = self.read_var(name)?.reg;
                         self.emit(Instruction::TableReserve {
                             table: t_reg,
                             bound: b_reg,
@@ -293,12 +328,12 @@ impl<'a> IrLowerer<'a> {
                         ty: pre_loop_local.ty.clone(),
                         args: vec![(pre_header, pre_loop_local.reg)],
                     });
-                    self.update_var(&var, phi_reg, pre_loop_local.ty.clone(), pre_loop_local.layout);
+                    self.update_var(&var, phi_reg, pre_loop_local.ty.clone(), pre_loop_local.layout)?;
                     phis.push((var, phi_reg));
                 }
 
                 let cond_reg = if let (Some((guard, _, _)), Some(b_reg)) = (&conv, conv_bound_reg) {
-                    let g_reg = self.read_var(guard).reg;
+                    let g_reg = self.read_var(guard)?.reg;
                     let c_reg = self.next_reg();
                     self.emit(Instruction::Less {
                         target: c_reg,
@@ -307,7 +342,7 @@ impl<'a> IrLowerer<'a> {
                     });
                     c_reg
                 } else {
-                    self.lower_expr(condition, None).0
+                    self.lower_expr(condition, None)?.0
                 };
                 self.terminate(Terminator::Branch {
                     cond: cond_reg,
@@ -316,8 +351,11 @@ impl<'a> IrLowerer<'a> {
                 });
 
                 if let Some((guard, names, nested_fills)) = &conv {
-                    let guard_reg = self.read_var(guard).reg;
-                    let reserved = names.iter().map(|name| self.read_var(name).reg).collect();
+                    let guard_reg = self.read_var(guard)?.reg;
+                    let reserved = names
+                        .iter()
+                        .map(|name| Ok(self.read_var(name)?.reg))
+                        .collect::<Result<Vec<_>, LowerError>>()?;
 
                     // --- Nested Table Reserve for Multidimensional Matrices ---
                     // For a 2D fill like `t[i][j] = 0`, detect tables whose
@@ -325,7 +363,7 @@ impl<'a> IrLowerer<'a> {
                     // (row count) before the loop starts.
                     let mut nested_fill_regs: Vec<(String, RegId)> = Vec::new();
                     for name in names {
-                        let local = self.read_var(name);
+                        let local = self.read_var(name)?;
                         if let StaticType::Table(inner_ty) = &local.ty
                             && matches!(**inner_ty, StaticType::Table(_)) {
                             // Pre-allocate the outer spine of rows.
@@ -341,7 +379,7 @@ impl<'a> IrLowerer<'a> {
                     // These are in nested_fills rather than names because obj was Expr::Index.
                     for name in nested_fills {
                         if self.has_var(name) {
-                            let local = self.read_var(name);
+                            let local = self.read_var(name)?;
                             if let StaticType::Table(inner_ty) = &local.ty
                                 && matches!(**inner_ty, StaticType::Table(_)) {
                                 self.emit(Instruction::TableReserve {
@@ -363,7 +401,7 @@ impl<'a> IrLowerer<'a> {
                 self.current_block = body_block;
                 self.scopes.push(BTreeMap::new());
                 for s in body {
-                    self.lower_stmt(s);
+                    self.lower_stmt(s)?;
                 }
                 self.scopes.pop();
                 if conv.is_some() {
@@ -374,7 +412,7 @@ impl<'a> IrLowerer<'a> {
                 self.terminate(Terminator::Jump(header_block));
 
                 for (var, phi_reg) in &phis {
-                    let back_edge_local = self.read_var(var);
+                    let back_edge_local = self.read_var(var)?;
                     for instr in &mut self.blocks[header_block].instrs {
                         if let Instruction::Phi { target, args, .. } = instr
                             && *target == *phi_reg
@@ -386,8 +424,8 @@ impl<'a> IrLowerer<'a> {
                 }
 
                 for (var, phi_reg) in &phis {
-                    let local = self.read_var(var);
-                    self.update_var(var, *phi_reg, local.ty.clone(), local.layout);
+                    let local = self.read_var(var)?;
+                    self.update_var(var, *phi_reg, local.ty.clone(), local.layout)?;
                 }
 
                 self.current_block = exit_block;
@@ -399,7 +437,7 @@ impl<'a> IrLowerer<'a> {
                 self.scopes.push(BTreeMap::new());
 
                 for s in body {
-                    self.lower_stmt(s);
+                    self.lower_stmt(s)?;
                 }
 
                 if let Some(block_local) = self.scopes.last_mut() {
@@ -432,7 +470,7 @@ impl<'a> IrLowerer<'a> {
             Stmt::Print { exprs } => {
                 let mut operands = Vec::new();
                 for e in exprs {
-                    let (r, ty) = self.lower_expr(e, None);
+                    let (r, ty) = self.lower_expr(e, None)?;
                     operands.push((r, ty));
                 }
                 self.emit(Instruction::Print { operands });
@@ -442,7 +480,7 @@ impl<'a> IrLowerer<'a> {
                 then_body,
                 else_body,
             } => {
-                let (cond_reg, _) = self.lower_expr(condition, None);
+                let (cond_reg, _) = self.lower_expr(condition, None)?;
 
                 let then_block = self.new_block();
                 let else_block = self.new_block();
@@ -464,10 +502,10 @@ impl<'a> IrLowerer<'a> {
                 let mut phi_order: Vec<(String, RegId)> = mutated
                     .into_iter()
                     .map(|name| {
-                        let local = self.read_var(&name);
-                        (name, local.reg)
+                        let local = self.read_var(&name)?;
+                        Ok((name, local.reg))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, LowerError>>()?;
                 phi_order.sort_by(|(name_a, a), (name_b, b)| (a, name_a).cmp(&(b, name_b)));
 
                 let snapshot = self.scopes.clone();
@@ -475,64 +513,65 @@ impl<'a> IrLowerer<'a> {
                 self.current_block = then_block;
                 self.scopes.push(BTreeMap::new());
                 for s in then_body {
-                    self.lower_stmt(s);
+                    self.lower_stmt(s)?;
                 }
                 self.scopes.pop();
                 let then_end = self.current_block;
                 let then_regs: Vec<(String, RegId)> = phi_order
                     .iter()
-                    .map(|(name, _)| (name.clone(), self.read_var(name).reg))
-                    .collect();
+                    .map(|(name, _)| Ok((name.clone(), self.read_var(name)?.reg)))
+                    .collect::<Result<Vec<_>, LowerError>>()?;
                 self.terminate(Terminator::Jump(join_block));
 
                 self.scopes = snapshot;
                 self.current_block = else_block;
                 self.scopes.push(BTreeMap::new());
                 for s in else_body {
-                    self.lower_stmt(s);
+                    self.lower_stmt(s)?;
                 }
                 self.scopes.pop();
                 let else_end = self.current_block;
                 let else_regs: Vec<(String, RegId)> = phi_order
                     .iter()
-                    .map(|(name, _)| (name.clone(), self.read_var(name).reg))
-                    .collect();
+                    .map(|(name, _)| Ok((name.clone(), self.read_var(name)?.reg)))
+                    .collect::<Result<Vec<_>, LowerError>>()?;
                 self.terminate(Terminator::Jump(join_block));
 
                 self.current_block = join_block;
                 for (i, (name, _)) in phi_order.iter().enumerate() {
                     let phi_reg = self.next_reg();
-                    let local = self.read_var(name);
+                    let local = self.read_var(name)?;
                     self.emit(Instruction::Phi {
                         target: phi_reg,
                         ty: local.ty.clone(),
                         args: vec![(then_end, then_regs[i].1), (else_end, else_regs[i].1)],
                     });
-                    self.update_var(name, phi_reg, local.ty.clone(), local.layout);
+                    self.update_var(name, phi_reg, local.ty.clone(), local.layout)?;
                 }
             }
         }
+        Ok(())
     }
 
-    fn lookup_layout_for(&self, expr: &Expr) -> LayoutVerdict {
+    fn lookup_layout_for(&self, expr: &Expr) -> Result<LayoutVerdict, LowerError> {
         match expr {
             Expr::TableCtor(_) => {
                 if let Some(&site_id) = self.shape.sites.get(&(expr as *const Expr)) {
-                    self.shape.layouts[site_id]
+                    Ok(self.shape.layouts[site_id])
                 } else {
-                    LayoutVerdict::default()
+                    Ok(LayoutVerdict::default())
                 }
             }
             Expr::Identifier(name) => {
-                self.read_var(name).layout
+                Ok(self.read_var(name)?.layout)
             }
             // Fall back recursively for multi-dimensional arrays like t[i]
             Expr::Index { obj, .. } => self.lookup_layout_for(obj),
-            _ => LayoutVerdict::default(),
+            _ => Ok(LayoutVerdict::default()),
         }
     }
 
-    fn lower_expr(&mut self, expr: &Expr, target: Option<RegId>) -> (RegId, StaticType) {
+    fn lower_expr(&mut self, expr: &Expr, target: Option<RegId>) -> Result<(RegId, StaticType), LowerError> {
         let reg = target.unwrap_or_else(|| self.next_reg());
 
         match expr {
@@ -541,28 +580,28 @@ impl<'a> IrLowerer<'a> {
                     target: reg,
                     val: *val,
                 });
-                (reg, StaticType::Integer)
+                Ok((reg, StaticType::Integer))
             }
             Expr::Float(val) => {
                 self.emit(Instruction::LoadFloat {
                     target: reg,
                     val: *val,
                 });
-                (reg, StaticType::Float)
+                Ok((reg, StaticType::Float))
             }
             Expr::Boolean(val) => {
                 self.emit(Instruction::LoadBool {
                     target: reg,
                     val: *val,
                 });
-                (reg, StaticType::Boolean)
+                Ok((reg, StaticType::Boolean))
             }
             Expr::String(val) => {
                 self.emit(Instruction::LoadString {
                     target: reg,
                     val: val.clone(),
                 });
-                (reg, StaticType::String)
+                Ok((reg, StaticType::String))
             }
             Expr::Nil => {
                 unreachable!("nil outside a table release")
@@ -570,7 +609,7 @@ impl<'a> IrLowerer<'a> {
             Expr::SysAllocCount => {
                 let target = self.next_reg();
                 self.emit(Instruction::SysAllocCount { target });
-                (target, StaticType::Integer)
+                Ok((target, StaticType::Integer))
             }
             Expr::RecordCtor(fields) => {
                 // Records compile to the same LLVM table representation as arrays.
@@ -604,7 +643,7 @@ impl<'a> IrLowerer<'a> {
 
                 let mut elem_regs = Vec::with_capacity(fields.len());
                 for (_, val) in fields {
-                    let (r, _) = self.lower_expr(val, None);
+                    let (r, _) = self.lower_expr(val, None)?;
                     elem_regs.push(r);
                 }
 
@@ -612,7 +651,7 @@ impl<'a> IrLowerer<'a> {
                 // so we use integer buffers and LLVM bitcasting for mixed types.
                 let elem_for_header = StaticType::Table(Box::new(StaticType::Integer));
 
-                let mode_bit = match self.lookup_layout_for(expr) {
+                let mode_bit = match self.lookup_layout_for(expr)? {
                     crate::shape::LayoutVerdict::Sparse => 0x01,
                     _ => 0x00,
                 };
@@ -637,7 +676,7 @@ impl<'a> IrLowerer<'a> {
                     });
                 }
                 // Return the record type for scope tracking
-                (reg, record_ty)
+                Ok((reg, record_ty))
             }
             Expr::TableCtor(elems) => {
                 let elem = self.shape.elem_of(expr);
@@ -667,11 +706,11 @@ impl<'a> IrLowerer<'a> {
                 for e in elems {
                     // If `e` is an Identifier, `lower_expr` natively fetches its
                     // existing SSA register — no re-allocation, no ownership leak.
-                    let (r, _) = self.lower_expr(e, None);
+                    let (r, _) = self.lower_expr(e, None)?;
                     elem_regs.push(r);
                 }
 
-                let mode_bit = match self.lookup_layout_for(expr) {
+                let mode_bit = match self.lookup_layout_for(expr)? {
                     crate::shape::LayoutVerdict::Sparse => 0x01,
                     _ => 0x00,
                 };
@@ -699,11 +738,11 @@ impl<'a> IrLowerer<'a> {
                         value: v_reg,
                     });
                 }
-                (reg, StaticType::Table(Box::new(elem)))
+                Ok((reg, StaticType::Table(Box::new(elem))))
             }
             Expr::Index { obj, key } => {
-                let (t_reg, t_ty) = self.lower_expr(obj, None);
-                let (i_reg, _) = self.lower_expr(key, None);
+                let (t_reg, t_ty) = self.lower_expr(obj, None)?;
+                let (i_reg, _) = self.lower_expr(key, None)?;
                 // Check if key is a constant integer literal for field index lookup.
                 let field_index = if let Expr::Integer(n) = key.as_ref() {
                     Some(*n)
@@ -728,10 +767,10 @@ impl<'a> IrLowerer<'a> {
                     index: i_reg,
                     target_ty: target_ty.clone(),
                 });
-                (reg, target_ty)
+                Ok((reg, target_ty))
             }
             Expr::Identifier(name) => {
-                let local = self.read_var(name);
+                let local = self.read_var(name)?;
                 if target.is_some() && reg != local.reg {
                     self.emit(Instruction::Move {
                         target: reg,
@@ -739,16 +778,16 @@ impl<'a> IrLowerer<'a> {
                         ty: local.ty.clone(),
                     });
                 } else {
-                    return (local.reg, local.ty);
+                    return Ok((local.reg, local.ty));
                 }
-                (reg, local.ty)
+                Ok((reg, local.ty))
             }
             Expr::BinaryOp {
                 op: op @ (BinOp::And | BinOp::Or),
                 left,
                 right,
             } => {
-                let (l_reg, _) = self.lower_expr(left, None);
+                let (l_reg, _) = self.lower_expr(left, None)?;
                 let then_block = self.new_block();
                 let else_block = self.new_block();
                 let join_block = self.new_block();
@@ -765,7 +804,7 @@ impl<'a> IrLowerer<'a> {
                 };
 
                 self.current_block = value_block;
-                let (v_reg, _) = self.lower_expr(right, None);
+                let (v_reg, _) = self.lower_expr(right, None)?;
                 let value_end = self.current_block;
                 self.terminate(Terminator::Jump(join_block));
 
@@ -789,11 +828,11 @@ impl<'a> IrLowerer<'a> {
                     ty: StaticType::Boolean,
                     args: vec![(t_end, t_reg), (e_end, e_reg)],
                 });
-                (reg, StaticType::Boolean)
+                Ok((reg, StaticType::Boolean))
             }
             Expr::BinaryOp { op, left, right } => {
-                let (l_reg, l_ty) = self.lower_expr(left, None);
-                let (r_reg, r_ty) = self.lower_expr(right, None);
+                let (l_reg, l_ty) = self.lower_expr(left, None)?;
+                let (r_reg, r_ty) = self.lower_expr(right, None)?;
                 match op {
                     BinOp::Add => self.emit(Instruction::Add {
                         target: reg,
@@ -879,31 +918,31 @@ impl<'a> IrLowerer<'a> {
                         }
                     }
                 };
-                (reg, ty)
+                Ok((reg, ty))
             }
             Expr::UnaryOp { op, expr } => {
-                let (x_reg, x_ty) = self.lower_expr(expr, None);
+                let (x_reg, x_ty) = self.lower_expr(expr, None)?;
                 match op {
                     UnOp::Neg => {
                         self.emit(Instruction::Neg {
                             target: reg,
                             source: x_reg,
                         });
-                        (reg, x_ty)
+                        Ok((reg, x_ty))
                     }
                     UnOp::Not => {
                         self.emit(Instruction::Not {
                             target: reg,
                             source: x_reg,
                         });
-                        (reg, StaticType::Boolean)
+                        Ok((reg, StaticType::Boolean))
                     }
                     UnOp::Len => {
                         self.emit(Instruction::TableLen {
                             target: reg,
                             table: x_reg,
                         });
-                        (reg, StaticType::Integer)
+                        Ok((reg, StaticType::Integer))
                     }
                 }
             }

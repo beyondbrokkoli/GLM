@@ -33,14 +33,18 @@ pub struct GlmTable {
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // === GLM_TRACE signal array ===
-// 256 one-byte slots mapped MAP_SHARED off ./.glm_trace.bin — the same
-// bytes the compiler pokes with write_at (src/trace.rs). A signal is a
-// bare store, so tracing survives crashes with no flush step and costs
-// no syscall in steady state (the gauntlet's 1M ctor/free churn stays
-// clean). First caller maps; later callers reuse the pointer.
+// 256 one-byte slots mapped MAP_SHARED off ./.glm_rt_trace.bin — a
+// runtime-owned sidecar, fully separate from the compiler's
+// .glm_trace.bin plate, so neither writer can ever touch the other's
+// bytes (the old shared-file setup let the runtime's set_len(256)
+// ftruncate the compiler's counters, histograms, and scope sections).
+// A signal is a bare store, so tracing survives crashes with no flush
+// step and costs no syscall in steady state (the gauntlet's 1M
+// ctor/free churn stays clean). First caller maps; later callers reuse
+// the pointer.
 
 const TRACE_SLOTS: usize = 256;
-const TRACE_FILE: &str = ".glm_trace.bin";
+const TRACE_FILE: &str = ".glm_rt_trace.bin";
 
 static TRACE_MAP: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
 static LEAK_HOOK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);

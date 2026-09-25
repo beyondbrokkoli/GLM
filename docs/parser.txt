@@ -1,2 +1,15 @@
 Recursive-descent parser: turns the lexer's token stream into
 `ast::Stmt`/`ast::Expr` trees.
+
+Fully Result-based (`Result<T, ParseError>`, `?` bubbling) — no panics on
+user syntax errors. `ParseError(pub String)` carries one user-facing
+"Syntax Error: …" message per failure; the messages are corpus-pinned,
+byte-identical.
+
+[parse_program]
+The Gate 0 catch site. One statement's ParseError poisons the token
+stream (no sibling resumption possible): the error is ledgered into
+`Parser::diagnostics`, TRACE_GHOST_BAIL_PARSER (slot 69) fires
+scope-tagged as the program root (scope 0, depth 0, parent none), and
+parsing bails the rest of the file. The partial AST is dead — Gate 0 in
+main.rs exits before any consumer touches it.
