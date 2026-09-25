@@ -2,6 +2,7 @@
 use crate::ast::StaticType;
 use crate::ir::{Instruction, IrProgram, RegId, Terminator};
 use crate::shape::LayoutVerdict;
+use glm_rt::trace;
 use std::collections::{HashMap, HashSet};
 
 fn llvm_type(ty: &StaticType) -> &'static str {
@@ -166,6 +167,8 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                 }
                 
                 Instruction::TableNew { target, elem, flags, is_record } => {
+                    trace::compiler_trace_set(trace::TRACE_OFFLOAD_EMIT);
+
                     needs_tbl_new_decl = true;
                     needs_hdr_md = true;
                     if *is_record {
@@ -318,7 +321,14 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                                     format!("  {cv} = ptrtoint ptr %v{value} to i64\n  {cvv} = {cv}\n",
                                         cv = cast_var, cvv = cast_var_cv, value = value)
                                 }
-                                _ => String::new(),
+                                _ => {
+                                    if !reg_types.contains_key(value) {
+                                        // Untracked value into an i64 slot: the
+                                        // ptrtoint cast was skipped — type confusion.
+                                        trace::compiler_trace_set(trace::TRACE_FAIL_TYPE_CONFUSION);
+                                    }
+                                    String::new()
+                                }
                             }
                         }
                     } else if matches!(elem, StaticType::Boolean) {
@@ -417,7 +427,12 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                         } else {
                             match reg_types.get(value) {
                                 Some(ty) => ty.clone(),
-                                None => StaticType::Integer,
+                                None => {
+                                    // Untracked value into an i64 slot: the
+                                    // ptrtoint cast was skipped — type confusion.
+                                    trace::compiler_trace_set(trace::TRACE_FAIL_TYPE_CONFUSION);
+                                    StaticType::Integer
+                                }
                             }
                         };
                         match &val_ty {
@@ -472,6 +487,8 @@ pub fn generate_llvm_ir(program: &IrProgram) -> String {
                     ts += 1;
                 }
                 Instruction::TableFree { table } => {
+                    trace::compiler_trace_set(trace::TRACE_OFFLOAD_EMIT);
+
                     needs_tbl_free_decl = true;
                     code.push_str(&format!("  call void @glm_tbl_free(ptr %v{})\n", table));
                 }

@@ -3,7 +3,7 @@
 use crate::ast::{BinOp, Expr, StaticType, Stmt, UnOp};
 use crate::ir::{BasicBlock, BlockId, Instruction, IrProgram, RegId, Terminator};
 use crate::shape::{LayoutVerdict, ShapeFacts};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone)]
 struct Local {
@@ -22,7 +22,7 @@ pub struct IrLowerer<'a> {
     pub blocks: Vec<BasicBlock>,
     current_block: BlockId,
     free_reg: RegId,
-    scopes: Vec<HashMap<String, Local>>,
+    scopes: Vec<BTreeMap<String, Local>>,
     loop_ctxs: Vec<LoopCtx>,
     shape: &'a ShapeFacts,
 }
@@ -33,7 +33,7 @@ impl<'a> IrLowerer<'a> {
             blocks: vec![BasicBlock::new(0)],
             current_block: 0,
             free_reg: 0,
-            scopes: vec![HashMap::new()],
+            scopes: vec![BTreeMap::new()],
             loop_ctxs: Vec::new(),
             shape,
         }
@@ -361,7 +361,7 @@ impl<'a> IrLowerer<'a> {
                 }
 
                 self.current_block = body_block;
-                self.scopes.push(HashMap::new());
+                self.scopes.push(BTreeMap::new());
                 for s in body {
                     self.lower_stmt(s);
                 }
@@ -396,7 +396,7 @@ impl<'a> IrLowerer<'a> {
                 let outer_keys: BTreeSet<String> =
                     self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
 
-                self.scopes.push(HashMap::new());
+                self.scopes.push(BTreeMap::new());
 
                 for s in body {
                     self.lower_stmt(s);
@@ -473,7 +473,7 @@ impl<'a> IrLowerer<'a> {
                 let snapshot = self.scopes.clone();
 
                 self.current_block = then_block;
-                self.scopes.push(HashMap::new());
+                self.scopes.push(BTreeMap::new());
                 for s in then_body {
                     self.lower_stmt(s);
                 }
@@ -487,7 +487,7 @@ impl<'a> IrLowerer<'a> {
 
                 self.scopes = snapshot;
                 self.current_block = else_block;
-                self.scopes.push(HashMap::new());
+                self.scopes.push(BTreeMap::new());
                 for s in else_body {
                     self.lower_stmt(s);
                 }

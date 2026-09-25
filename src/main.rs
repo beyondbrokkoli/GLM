@@ -12,6 +12,18 @@ mod shape;
 mod type_checker;
 
 fn main() {
+    // GLM_TRACE bracket: any compile panic records slot 1
+    // (EXPECT_BUILD_FAIL) before the abort — write_at is already on
+    // disk, so no unwind/catch is needed even with panic=abort. The
+    // default hook is chained so stderr keeps its exact corpus-pinned
+    // format. Slot 0 marks the full compile+link success.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        glm_rt::trace::compiler_trace_set(glm_rt::trace::TRACE_BUILD_FAIL);
+        eprintln!("GLM_TRACE: slot 1 — build failed (EXPECT_BUILD_FAIL)");
+        default_hook(info);
+    }));
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         panic!("Usage: glm <file.lua>");
@@ -65,6 +77,8 @@ fn main() {
 
     if status.success() {
         println!("Success! Executable written to ./glm_out");
+        glm_rt::trace::compiler_trace_set(glm_rt::trace::TRACE_COMPILED);
+        eprintln!("GLM_TRACE: slot 0 — compiled ok");
     } else {
         panic!("Clang failed to assemble and link the executable.");
     }

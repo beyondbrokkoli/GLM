@@ -3,8 +3,14 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc, realloc};
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
 use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+use crate::trace::{
+    TRACE_FAIL_LEAK_DETECTED, TRACE_RT_ALLOC, TRACE_RT_FREE, TRACE_RT_SPARSE_UPGRADE,
+};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +31,82 @@ pub struct GlmTable {
 }
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// === GLM_TRACE signal array ===
+// 256 one-byte slots mapped MAP_SHARED off ./.glm_trace.bin — the same
+// bytes the compiler pokes with write_at (src/trace.rs). A signal is a
+// bare store, so tracing survives crashes with no flush step and costs
+// no syscall in steady state (the gauntlet's 1M ctor/free churn stays
+// clean). First caller maps; later callers reuse the pointer.
+
+const TRACE_SLOTS: usize = 256;
+const TRACE_FILE: &str = ".glm_trace.bin";
+
+static TRACE_MAP: AtomicPtr<u8> = AtomicPtr::new(ptr::null_mut());
+static LEAK_HOOK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub unsafe fn init_trace_map() {
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false) // accumulate across runs — never reset the array
+        .open(TRACE_FILE)
+    else {
+        return; // unwritable CWD: degrade silently, tracing never fatal
+    };
+    let _ = file.set_len(TRACE_SLOTS as u64);
+    let ptr = unsafe {
+        mmap(
+            ptr::null_mut(),
+            TRACE_SLOTS,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if is_map_failed(ptr) {
+        return;
+    }
+    TRACE_MAP.store(ptr.cast::<u8>(), Ordering::Relaxed);
+}
+
+#[inline]
+fn trace_map() -> *mut u8 {
+    let map = TRACE_MAP.load(Ordering::Relaxed);
+    if !map.is_null() {
+        return map;
+    }
+    unsafe { init_trace_map() };
+    TRACE_MAP.load(Ordering::Relaxed)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glm_trace_set(slot: u8) {
+    let map = trace_map();
+    if !map.is_null() {
+        unsafe { *map.add(slot as usize) = 1 };
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glm_trace_clear(slot: u8) {
+    let map = trace_map();
+    if !map.is_null() {
+        unsafe { *map.add(slot as usize) = 0 };
+    }
+}
+
+// Registered once by the first glm_tbl_new: at process exit, any live
+// GlmTable is a leak. Runs even though the crate builds with
+// panic=abort (atexit fires on the normal exit path).
+unsafe extern "C" fn glm_trace_leak_check() {
+    if ALLOC_COUNT.load(Ordering::Relaxed) > 0 {
+        unsafe { glm_trace_set(TRACE_FAIL_LEAK_DETECTED) };
+        eprintln!("GLM_TRACE: slot 90 — leak at exit (sys_alloc_count() > 0)");
+    }
+}
 
 fn elem_layout(len: i64, esize: usize) -> Layout {
     let bytes = usize::try_from(len)
@@ -60,6 +142,13 @@ pub unsafe extern "C" fn glm_tbl_new(esize: usize, flags: u8) -> *mut GlmTable {
         },
     }));
     ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+    unsafe { glm_trace_set(TRACE_RT_ALLOC) };
+    if LEAK_HOOK
+        .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        unsafe { atexit(glm_trace_leak_check) };
+    }
     hdr
 }
 
@@ -124,6 +213,7 @@ pub unsafe fn upgrade_to_sparse(t: *mut GlmTable) -> bool {
     tbl.reserve = 0;
     tbl.mode = TableMode::Sparse;
     tbl.sparse_map = map;
+    unsafe { glm_trace_set(TRACE_RT_SPARSE_UPGRADE) };
     true
 }
 
@@ -155,6 +245,7 @@ pub unsafe extern "C" fn glm_tbl_set(t: *mut GlmTable, index: i64, val: *const u
     // ---- Dense: threshold check ----
     if index > tbl.len.saturating_add(SPARSE_THRESHOLD) {
         if !upgrade_to_sparse(t) {
+            unsafe { glm_trace_set(TRACE_RT_SPARSE_UPGRADE) };
             let tbl = &mut *t;
             if !tbl.data.is_null() {
                 if tbl.reserve != 0 {
@@ -308,6 +399,7 @@ const PROT_NONE: i32 = 0x0;
 const PROT_READ: i32 = 0x1;
 const PROT_WRITE: i32 = 0x2;
 const MAP_PRIVATE: i32 = 0x02;
+const MAP_SHARED: i32 = 0x01;
 const MAP_ANONYMOUS: i32 = 0x20;
 const MAP_NORESERVE: i32 = 0x4000;
 const MREMAP_MAYMOVE: i32 = 1;
@@ -317,6 +409,7 @@ unsafe extern "C" {
     fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
     fn munmap(addr: *mut c_void, len: usize) -> i32;
     fn mremap(addr: *mut c_void, old_len: usize, new_len: usize, flags: i32, ...) -> *mut c_void;
+    fn atexit(cb: unsafe extern "C" fn()) -> i32;
 }
 
 fn reserve_for(bytes: usize) -> usize {
@@ -403,6 +496,7 @@ pub unsafe extern "C" fn glm_tbl_free(t: *mut GlmTable) {
     if t.is_null() {
         return;
     }
+    unsafe { glm_trace_set(TRACE_RT_FREE) };
     ALLOC_COUNT.fetch_sub(1, Ordering::Relaxed);
     let tbl = unsafe { Box::from_raw(t) };
 

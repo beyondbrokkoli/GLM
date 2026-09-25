@@ -1,19 +1,19 @@
 use crate::ast::{BinOp, Expr, StaticType, Stmt, UnOp};
 use crate::shape::ShapeFacts;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 pub struct TypeChecker<'a> {
-    scopes: Vec<HashMap<String, StaticType>>,
+    scopes: Vec<BTreeMap<String, StaticType>>,
     shape: &'a mut ShapeFacts,
-    substitutions: HashMap<usize, StaticType>,
+    substitutions: BTreeMap<usize, StaticType>,
 }
 
 impl<'a> TypeChecker<'a> {
     pub fn new(shape: &'a mut ShapeFacts) -> Self {
         Self {
-            scopes: vec![HashMap::new()],
+            scopes: vec![BTreeMap::new()],
             shape,
-            substitutions: HashMap::new(),
+            substitutions: BTreeMap::new(),
         }
     }
 
@@ -50,7 +50,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn begin_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
     fn end_scope(&mut self) {
         self.scopes.pop().expect("Cannot pop global scope");

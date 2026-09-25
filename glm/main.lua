@@ -27,6 +27,7 @@ while pa_wit_i < pa_lim do
     pa_wit_i = pa_wit_i + 2
 end
 print("TABLE 0 (Phase A) CHECKSUM", pa_checksum)
+pa_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE B — The Staircase
 -- Shape: Nested loops where the inner bound is tied to the outer induction
@@ -52,6 +53,7 @@ while pb_wit_i < 99999 do
     pb_wit_i = pb_wit_i + 1
 end
 print("TABLE 1 (Phase B) CHECKSUM", pb_checksum)
+pb_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE C — The Polisher
 -- Shape: Two consecutive, independent loops over the same table and limits.
@@ -77,6 +79,7 @@ while pc_wit_i < pc_lim do
     pc_wit_i = pc_wit_i + 1
 end
 print("TABLE 2 (Phase C) CHECKSUM", pc_checksum)
+pc_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE D — The Sentinel
 -- Shape: Data-dependent termination. The search loop iterates until it
@@ -107,6 +110,8 @@ end
 pd_checksum1 = pd_checksum1 + (30 + 1) * pd_tbl[30] -- Account for the sentinel
 print("TABLE 3 (Phase D) CHECKSUM", pd_checksum1)
 print("TABLE 4 (Phase D) DIARY[0]", pd_diary[0])
+pd_tbl = nil                                 -- independent sites, both sole
+pd_diary = nil
 
 -- PHASE E — The Frozen Handoff
 -- Shape: The outer induction variable is captured as a loop-invariant
@@ -133,6 +138,7 @@ while pe_wit_i < pe_outer_lim do
     pe_wit_i = pe_wit_i + 1
 end
 print("TABLE 5 (Phase E) CHECKSUM", pe_checksum)
+pe_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE F — The Carried Alias
 -- Shape: Identical nesting to Phase E, but the inner loop IV is initialized
@@ -156,6 +162,7 @@ while pf_wit_i < pf_lim do
     pf_wit_i = pf_wit_i + 1
 end
 print("TABLE 6 (Phase F) CHECKSUM", pf_checksum)
+pf_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE G — The Mirror
 -- Shape: Sequential reads from a source table paired with non-constant
@@ -190,6 +197,8 @@ while pg_wit_i2 < pg_lim do
     pg_wit_i2 = pg_wit_i2 + 1
 end
 print("TABLE 8 (Phase G) DST CHECKSUM", pg_checksum2)
+pg_src_tbl = nil                             -- independent sites, both sole
+pg_dst_tbl = nil
 
 -- PHASE H — The Abacus
 -- Shape: Standard ramp fill followed by a loop-carried scalar reduction
@@ -218,6 +227,8 @@ while ph_wit_i1 < ph_lim do
 end
 print("TABLE 9 (Phase H) CHECKSUM", ph_checksum1)
 print("TABLE 10 (Phase H) DIARY[0]", ph_diary[0])
+ph_tbl = nil                                 -- independent sites, both sole
+ph_diary = nil
 
 -- PHASE I — The One-Shot
 -- Shape: A loop gated purely by a boolean flag rather than an induction
@@ -238,6 +249,7 @@ while pi_wit_i < 1 do
     pi_wit_i = pi_wit_i + 1
 end
 print("TABLE 11 (Phase I) CHECKSUM", pi_checksum)
+pi_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE J — The Terraces
 -- Shape: Non-zero start index for the first loop leaves an unwritten prefix.
@@ -271,6 +283,8 @@ end
 print("TABLE 12 (Phase J) CHECKSUM", pj_checksum1)
 -- In standard Lua, diary[3] will print 'nil'. In your subset, it prints '0'.
 print("TABLE 13 (Phase J) DIARY", pj_diary[0], pj_diary[1], pj_diary[2], pj_diary[3])
+pj_tbl = nil                                 -- independent sites, both sole
+pj_diary = nil
 
 -- PHASE K — The Cube
 -- Shape: O(N^3) triple loop. The innermost write uses the innermost IV
@@ -298,6 +312,7 @@ while pk_wit_i < pk_lim do
     pk_wit_i = pk_wit_i + 1
 end
 print("TABLE 14 (Phase K) CHECKSUM", pk_checksum)
+pk_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE L — The Poisoned Chalice
 -- Shape: Three distinct local variables trace identically back to the
@@ -323,6 +338,7 @@ while pl_wit_i < pl_lim do
     pl_wit_i = pl_wit_i + 1
 end
 print("TABLE 15 (Phase L) CHECKSUM", pl_checksum)
+pl_tbl = nil                                 -- sole → real free; phase done
 
 -- PHASE M — The Handoff
 -- Shape: Two table registers referencing a single allocation.
@@ -344,6 +360,12 @@ while pm_wit_i < pm_lim do
     pm_wit_i = pm_wit_i + 1
 end
 print("TABLE 16 (Phase M) CHECKSUM", pm_checksum)
+
+-- [MEMORY TRIANGULATION FIX]
+-- Dissolve the Alias Union sequentially. Dropping pm_tbl2 restores sole
+-- ownership to pm_tbl1. Dropping pm_tbl1 then safely emits the TableFree.
+pm_tbl2 = nil
+pm_tbl1 = nil
 
 -- PHASE N — The Mailbox (chess move validation)
 -- Shape: one long-lived board co-held by a read alias on every move,
@@ -389,6 +411,7 @@ while pn_move < pn_moves do
     pn_move = pn_move + 1
 end
 print("TABLE 17 (Phase N) FOLD", pn_fold)
+pn_board = nil                               -- sole now (pn_view died with the loop)
 
 -- PHASE O — Interleaved Ladders
 -- Shape: two buffers growing in lockstep, alternately, past the
@@ -420,6 +443,8 @@ while po_wit < po_lim do
     po_wit = po_wit + 2
 end
 print("TABLE 18 (Phase O) CHECKSUM", po_checksum)
+po_a = nil                                   -- independent sites, both sole
+po_b = nil
 
 -- PHASE Q — The Far Store (sparse graduation)
 -- Shape: born-empty table, one distant store, no ramp — the sparse
@@ -434,6 +459,7 @@ print("TABLE 18 (Phase O) CHECKSUM", po_checksum)
 local pq_far = {}
 pq_far[262143999] = 123456789
 print("TABLE 19 (Phase Q) FAR CELL", pq_far[262143999])
+pq_far = nil                                 -- sole → releases the ~2 GiB reservation
 
 -- PHASE R — The Scanline (software renderer churn)
 -- Shape: per-triangle temporary born, filled by a converted loop,

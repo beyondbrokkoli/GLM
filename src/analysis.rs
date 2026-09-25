@@ -1,9 +1,9 @@
 // src/analysis.rs
 use crate::ast::{Expr, Stmt};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 pub struct AnalysisContext<'a> {
-    pub sites: HashMap<*const Expr, usize>,
+    pub sites: BTreeMap<*const Expr, usize>,
 
     // --- Tuning Parameters (Heuristics) ---
     #[allow(dead_code)]
@@ -16,7 +16,7 @@ pub struct AnalysisContext<'a> {
 
 // Add the <'_> so the compiler knows it borrows the AST
 pub fn build_context(ast: &[Stmt]) -> AnalysisContext<'_> {
-    let mut sites = HashMap::new();
+    let mut sites = BTreeMap::new();
     number_sites(ast, &mut sites);
 
     AnalysisContext {
@@ -27,13 +27,13 @@ pub fn build_context(ast: &[Stmt]) -> AnalysisContext<'_> {
     }
 }
 
-pub fn number_sites(stmts: &[Stmt], sites: &mut HashMap<*const Expr, usize>) {
+pub fn number_sites(stmts: &[Stmt], sites: &mut BTreeMap<*const Expr, usize>) {
     for s in stmts {
         number_stmt(s, sites);
     }
 }
 
-fn number_stmt(stmt: &Stmt, sites: &mut HashMap<*const Expr, usize>) {
+fn number_stmt(stmt: &Stmt, sites: &mut BTreeMap<*const Expr, usize>) {
     match stmt {
         Stmt::LocalDecl { exprs, .. } => {
             for e in exprs {
@@ -70,7 +70,7 @@ fn number_stmt(stmt: &Stmt, sites: &mut HashMap<*const Expr, usize>) {
     }
 }
 
-fn number_expr(expr: &Expr, sites: &mut HashMap<*const Expr, usize>) {
+fn number_expr(expr: &Expr, sites: &mut BTreeMap<*const Expr, usize>) {
     match expr {
         Expr::TableCtor(elems) => {
             let id = sites.len();

@@ -1,233 +1,47 @@
-// src/shape.rs
+// src/shape/analyzer.rs
+use std::collections::{BTreeMap, BTreeSet};
 use crate::analysis::AnalysisContext;
 use crate::ast::{BinOp, Expr, Stmt, UnOp};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use glm_rt::trace;
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub enum Ty {
-    #[default]
-    Pending,
-    Int,
-    Flt,
-    Bool,
-    Str,
-    Tbl(Box<Ty>),
-    Record(Vec<(String, Ty)>),
-    Conflict,
-}
-
+use super::core::{LayoutVerdict, TableShape, BOUNDS_FAIL_THRESHOLD, NULL_ROOT, SPARSE_THRESHOLD};
+use super::facts::ShapeFacts;
+use super::helpers::{extract_guard, merge_table_scopes};
+use super::ty::{arith_ty, join_ty, scalar, Ty};
 use Ty::{Bool, Conflict, Flt, Int, Pending, Record, Str, Tbl};
 
-pub fn merge_table_scopes(
-    into: &mut [HashMap<String, TableShape>],
-    a: &[HashMap<String, TableShape>],
-    b: &[HashMap<String, TableShape>],
-) {
-    for ((into_slot, a_slot), b_slot) in into.iter_mut().zip(a).zip(b) {
-        for (name, val) in into_slot.iter_mut() {
-            if let Some(x) = a_slot.get(name) {
-                val.join(x);
-            }
-            if let Some(x) = b_slot.get(name) {
-                val.join(x);
-            }
-        }
-    }
-}
-
-fn scalar(t: &Ty) -> bool {
-    matches!(t, Int | Flt | Bool | Str)
-}
-
-fn join_ty(a: &Ty, b: &Ty) -> Ty {
-    match (a, b) {
-        (Pending, x) | (x, Pending) => x.clone(),
-        (Conflict, _) | (_, Conflict) => Conflict,
-        (Tbl(inner_a), Tbl(inner_b)) => {
-            // Deep monomorphism: recursively join inner types to safely collapse Pending.
-            let merged = join_ty(inner_a, inner_b);
-            if merged != Conflict {
-                Tbl(Box::new(merged))
-            } else {
-                Conflict
-            }
-        }
-        (Record(fields_a), Record(fields_b)) => {
-            // Strict structural equivalence: identical keys required, join each value.
-            if fields_a.len() != fields_b.len() {
-                return Conflict;
-            }
-            let mut result = Vec::with_capacity(fields_a.len());
-            for (name_a, ty_a) in fields_a {
-                if let Some((_, ty_b)) = fields_b.iter().find(|(n, _)| n == name_a) {
-                    match join_ty(ty_a, ty_b) {
-                        Conflict => return Conflict,
-                        merged => result.push((name_a.clone(), merged)),
-                    }
-                } else {
-                    return Conflict;
-                }
-            }
-            Record(result)
-        }
-        (x, y) if x == y => x.clone(),
-        _ => Conflict,
-    }
-}
-
-fn arith_ty(a: Ty, b: Ty) -> Ty {
-    if a == Pending || b == Pending {
-        Pending
-    } else if a == b && matches!(a, Int | Flt) {
-        a
-    } else {
-        Conflict
-    }
-}
-
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum LayoutVerdict {
-    #[default]
-    Dense,
-    Growing,
-    Sparse,
-    BoundsFail,
-}
-
-impl LayoutVerdict {
-        fn join(self, other: LayoutVerdict) -> LayoutVerdict {
-        use LayoutVerdict::*;
-        match (self, other) {
-            (BoundsFail, _) | (_, BoundsFail) => BoundsFail,
-            (Sparse, _) | (_, Sparse) => Sparse,
-            (Growing, _) | (_, Growing) => Growing,
-            _ => Dense,
-        }
-    }
-}
-
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct TableShape {
-        pub ty: Ty,
-        pub layout: LayoutVerdict,
-        pub aliases: BTreeSet<usize>,
-}
-
-impl TableShape {
-        pub fn join(&mut self, other: &Self) -> bool {
-        let mut changed = false;
-
-        let new_ty = join_ty(&self.ty, &other.ty);
-        if self.ty != new_ty {
-            self.ty = new_ty;
-            changed = true;
-        }
-
-        let new_layout = self.layout.join(other.layout);
-        if self.layout != new_layout {
-            self.layout = new_layout;
-            changed = true;
-        }
-
-        let len_before = self.aliases.len();
-        self.aliases.extend(&other.aliases);
-        if self.aliases.len() > len_before {
-            changed = true;
-        }
-
-        changed
-    }
-}
-
-pub struct ShapeFacts {
-    pub sites: HashMap<*const Expr, usize>,
-    pub elems: Vec<crate::ast::StaticType>,
-
-    #[allow(dead_code)] // The LLVM backend will use this soon!
-    pub layouts: Vec<LayoutVerdict>,
-
-    pub free_sites: HashSet<*const Stmt>,
-    pub name_dense: HashMap<(String, usize), bool>,
-    pub substitutions: HashMap<usize, crate::ast::StaticType>,
-}
-
-impl ShapeFacts {
-    pub fn elem_of(&self, ctor: &Expr) -> crate::ast::StaticType {
-        let id = self.sites[&(ctor as *const Expr)];
-        let elem = self.elems[id].clone();
-        // Resolve any Unknown type variables using the substitution map.
-        self.resolve_elem_type(elem)
-    }
-
-    fn resolve_elem_type(&self, ty: crate::ast::StaticType) -> crate::ast::StaticType {
-        match &ty {
-            crate::ast::StaticType::Unknown(id) => {
-                self.substitutions
-                    .get(id)
-                    .cloned()
-                    .unwrap_or(ty)
-            }
-            crate::ast::StaticType::Table(inner) => {
-                let resolved = self.resolve_elem_type((**inner).clone());
-                crate::ast::StaticType::Table(Box::new(resolved))
-            }
-            _ => ty,
-        }
-    }
-
-    pub fn is_dense_at_depth(&self, name: &str, depth: usize) -> bool {
-        self.name_dense
-            .get(&(name.to_string(), depth))
-            .copied()
-            .unwrap_or(false)
-    }
-
-    pub fn is_free(&self, stmt: &Stmt) -> bool {
-        self.free_sites.contains(&(stmt as *const Stmt))
-    }
-}
-
-
-const SPARSE_THRESHOLD: i64 = 100_000;
-
-const BOUNDS_FAIL_THRESHOLD: i64 = i64::MAX / 8;
-
-const NULL_ROOT: usize = usize::MAX;
-
 struct Analyzer {
-    scopes: Vec<HashMap<String, TableShape>>,
-    sites: HashMap<*const Expr, usize>,
+    scopes: Vec<BTreeMap<String, TableShape>>,
+    sites: BTreeMap<*const Expr, usize>,
     site_elem: Vec<Ty>,
     needed: Vec<bool>,
     changed: bool,
     recording: bool,
-    free_sites: HashSet<*const Stmt>,
-    name_dense: HashMap<(String, usize), bool>,
+    free_sites: BTreeSet<*const Stmt>,
+    name_dense: BTreeMap<(String, usize), bool>,
     verdicts: Vec<LayoutVerdict>,
-    child_sites: HashMap<usize, BTreeSet<usize>>,
+    child_sites: BTreeMap<usize, BTreeSet<usize>>,
 }
 
 pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
     let n = ctx.sites.len();
     let mut a = Analyzer {
-        scopes: vec![HashMap::new()],
+        scopes: vec![BTreeMap::new()],
         sites: ctx.sites.clone(),
         site_elem: vec![Pending; n],
         needed: vec![false; n],
         changed: false,
         recording: false,
-        free_sites: HashSet::new(),
-        name_dense: HashMap::new(),
+        free_sites: BTreeSet::new(),
+        name_dense: BTreeMap::new(),
         verdicts: vec![LayoutVerdict::Growing; n],
-        child_sites: HashMap::new(),
+        child_sites: BTreeMap::new(),
     };
 
-    let mut prev_end: Vec<HashMap<String, TableShape>> = Vec::new();
+    let mut prev_end: Vec<BTreeMap<String, TableShape>> = Vec::new();
     loop {
         a.changed = false;
-        a.scopes = vec![HashMap::new()];
+        a.scopes = vec![BTreeMap::new()];
         a.walk_stmts(ctx.ast);
         let end = a.scopes.clone();
         let stable = end == prev_end && !a.changed;
@@ -238,7 +52,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
     }
 
     a.recording = true;
-    a.scopes = vec![HashMap::new()];
+    a.scopes = vec![BTreeMap::new()];
     a.walk_stmts(ctx.ast);
 
     let mut elems = vec![crate::ast::StaticType::Integer; n];
@@ -260,7 +74,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         layouts: a.verdicts,
         free_sites: a.free_sites,
         name_dense: a.name_dense,
-        substitutions: HashMap::new(),
+        substitutions: BTreeMap::new(),
     }
 }
 
@@ -273,28 +87,23 @@ fn get_base_identifier(expr: &Expr) -> Option<&String> {
 }
 
 impl Analyzer {
+    fn trace(&self, slot: u8) {
+        if self.recording {
+            trace::compiler_trace_set(slot);
+        }
+    }
+
     fn elem_type_of_tbl(&self, id: usize) -> crate::ast::StaticType {
-        // [FIX]: The parent site may have been flagged Conflict by a heterogeneous
-        // IndexAssign (e.g. {{7}, {8}} → v34[1][1] = "string"). Check before
-        // rebuilding from children — the children are pure Int tables that never
-        // saw the conflict, so the child_sites path would silently return a valid
-        // Table<Table<Integer>> and ignore the Corruption entirely.
         if self.site_elem[id] == Conflict {
             panic!("Type Error: heterogeneous tables are not supported.");
         }
 
-        // [Deep-Free Preservation Strike] A Record site keeps its Record type
-        // even when it has tracked child constructors: the child_sites fast
-        // path below would otherwise retype {data: {1,2,3}} into
-        // Table(Table(Int)), erasing Record-ness — which stripped the
-        // deep-free flag at lowering and leaked the child.
         if let Record(fields) = &self.site_elem[id] {
             return crate::ast::StaticType::Record(
                 fields.iter().map(|(name, ty)| (name.clone(), self.ty_to_static(ty))).collect()
             );
         }
 
-        // Fast path for tracked child constructors: enforce multi-child coherence
         if let Some(children) = self.child_sites.get(&id) {
             let mut uniform_type: Option<crate::ast::StaticType> = None;
 
@@ -308,8 +117,7 @@ impl Analyzer {
                 match &uniform_type {
                     None => uniform_type = Some(child_ty.clone()),
                     Some(expected) if *expected != child_ty => {
-                        panic!("Type Error: heterogeneous tables are not supported — \
-                                nested constructors have conflicting memory shapes.");
+                        panic!("Type Error: heterogeneous tables are not supported — nested constructors have conflicting memory shapes.");
                     }
                     Some(_) => {}
                 }
@@ -320,8 +128,6 @@ impl Analyzer {
             }
         }
 
-        // If child_sites is missing or empty, resolve from the known site type.
-        // Handle both Tbl(inner) for constructors and scalar types from IndexAssign propagation.
         match &self.site_elem[id] {
             Tbl(inner) => crate::ast::StaticType::Table(Box::new(self.ty_to_static(inner))),
             Record(fields) => crate::ast::StaticType::Record(
@@ -360,7 +166,6 @@ impl Analyzer {
         }
     }
 
-
     fn walk_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::LocalDecl { names, exprs } => {
@@ -368,16 +173,24 @@ impl Analyzer {
                 for expr in exprs {
                     self.check_uses(expr);
                     if matches!(expr, Expr::Nil) {
+                        self.trace(trace::TRACE_BIND_SCALAR);
                         sets.push(TableShape {
                             ty: Pending,
                             layout: LayoutVerdict::default(),
                             aliases: BTreeSet::from([NULL_ROOT]),
                         });
                     } else {
-                        sets.push(self.infer_bind(expr));
+                        let bind = self.infer_bind(expr);
+                        if scalar(&bind.ty) {
+                            self.trace(trace::TRACE_BIND_SCALAR);
+                        } else if matches!(expr, Expr::TableCtor(_) | Expr::RecordCtor(_)) {
+                            self.trace(trace::TRACE_BIND_HEAP);
+                        }
+                        sets.push(bind);
                     }
                 }
                 while sets.len() < names.len() {
+                    self.trace(trace::TRACE_BIND_SCALAR);
                     sets.push(TableShape {
                         ty: Pending,
                         layout: LayoutVerdict::default(),
@@ -385,10 +198,16 @@ impl Analyzer {
                     });
                 }
 
-                // Only set initial bindings; preserve later updates from IndexAssign.
                 for (name, set) in names.iter().zip(sets) {
+                    let shadowed = self
+                        .scopes
+                        .last()
+                        .is_some_and(|s| s.contains_key(name));
+                    if shadowed {
+                        self.trace(trace::TRACE_SHAPE_DROP);
+                    }
                     let scope = self.scopes.last_mut().unwrap();
-                    scope.entry(name.clone()).or_insert(set);
+                    scope.insert(name.clone(), set);
                 }
             }
 
@@ -399,6 +218,11 @@ impl Analyzer {
                 }
                 self.check_uses(expr);
                 let bind = self.infer_bind(expr);
+                if scalar(&bind.ty) {
+                    self.trace(trace::TRACE_BIND_SCALAR);
+                } else if matches!(expr, Expr::TableCtor(_) | Expr::RecordCtor(_)) {
+                    self.trace(trace::TRACE_BIND_HEAP);
+                }
 
                 if matches!(bind.ty, Tbl(_)) {
                     let mut incoming = Pending;
@@ -473,7 +297,7 @@ impl Analyzer {
                 loop {
                     self.scopes = head.clone();
                     self.check_uses(condition);
-                    self.scopes.push(HashMap::new());
+                    self.scopes.push(BTreeMap::new());
                     self.walk_stmts(body);
                     self.scopes.pop();
                     let latch = self.scopes.clone();
@@ -495,12 +319,12 @@ impl Analyzer {
                 self.infer_expr(condition);
                 self.check_uses(condition);
                 let snapshot = self.scopes.clone();
-                self.scopes.push(HashMap::new());
+                self.scopes.push(BTreeMap::new());
                 self.walk_stmts(then_body);
                 self.scopes.pop();
                 let then_exit = self.scopes.clone();
                 self.scopes = snapshot;
-                self.scopes.push(HashMap::new());
+                self.scopes.push(BTreeMap::new());
                 self.walk_stmts(else_body);
                 self.scopes.pop();
                 let else_exit = self.scopes.clone();
@@ -508,7 +332,7 @@ impl Analyzer {
             }
 
             Stmt::Do { body } => {
-                self.scopes.push(HashMap::new());
+                self.scopes.push(BTreeMap::new());
                 self.walk_stmts(body);
                 self.scopes.pop();
             }
@@ -522,7 +346,6 @@ impl Analyzer {
         }
     }
 
-
     fn infer_bind(&mut self, expr: &Expr) -> TableShape {
         let (ty, aliases) = self.infer_expr(expr);
         TableShape {
@@ -531,7 +354,6 @@ impl Analyzer {
             aliases,
         }
     }
-
 
     fn resolve(&self, name: &str) -> (usize, TableShape) {
         for (depth, scope) in self.scopes.iter().enumerate().rev() {
@@ -542,26 +364,21 @@ impl Analyzer {
         panic!("Scope Error: reference to undeclared variable '{}'", name);
     }
 
-        fn resolve_aliases(&self, name: &str) -> BTreeSet<usize> {
+    fn resolve_aliases(&self, name: &str) -> BTreeSet<usize> {
         self.resolve(name).1.aliases
     }
 
-
     fn decide(&mut self, site: usize, vt: &Ty) {
-        // Already in final state — don't re-trigger changed.
         if self.site_elem[site] == Conflict {
             return;
         }
 
-        // Use join_ty instead of brittle != checks to cleanly absorb Pending types.
         let joined = join_ty(&self.site_elem[site], vt);
         if self.site_elem[site] != joined {
             self.site_elem[site] = joined.clone();
             self.changed = true;
         }
-        // Propagate decided type to scope entries for all aliases.
-        // Reconstruct the full table type before assigning to the scope variable,
-        // since site_elem stores the element type but scopes track the variable type.
+
         let expected_var_ty = Tbl(Box::new(self.site_elem[site].clone()));
 
         for scope in &mut self.scopes {
@@ -577,6 +394,7 @@ impl Analyzer {
             }
         }
     }
+
     fn infer_expr(&mut self, expr: &Expr) -> (Ty, BTreeSet<usize>) {
         match expr {
             Expr::Integer(_) => (Int, BTreeSet::new()),
@@ -589,13 +407,11 @@ impl Analyzer {
                 let mut first_elem_ty: Option<Ty> = None;
                 for e in elems {
                     let (t, _) = self.infer_expr(e);
-                    if matches!(t, Tbl(_)) {
-                        // FIX: Only insert into child_sites if it is actually a Table constructor AST node
-                        if let Some(&child_site) = self.sites.get(&(e as *const Expr)) {
-                            self.child_sites.entry(id).or_default().insert(child_site);
-                        }
+                    if matches!(t, Tbl(_))
+                        && let Some(&child_site) = self.sites.get(&(e as *const Expr))
+                    {
+                        self.child_sites.entry(id).or_default().insert(child_site);
                     }
-                    // Validate constructor homogeneity: first element sets the expected type.
                     match first_elem_ty {
                         None => first_elem_ty = Some(t.clone()),
                         Some(ref expected) if *expected != t => {
@@ -604,11 +420,10 @@ impl Analyzer {
                                 self.changed = true;
                             }
                         }
-                        Some(_) => {} // matches — continue
+                        Some(_) => {} 
                     }
                     self.decide(id, &t);
                 }
-                // Use the resolved site type if available, otherwise fall back to first element.
                 let resolved = if self.site_elem[id] != Pending {
                     self.site_elem[id].clone()
                 } else {
@@ -621,7 +436,6 @@ impl Analyzer {
                 let mut record_ty: Vec<(String, Ty)> = Vec::with_capacity(fields.len());
                 for (name, val_expr) in fields {
                     let (t, _) = self.infer_expr(val_expr);
-                    // Track child constructors for nested tables within records
                     if matches!(t, Tbl(_))
                         && let Some(&child_site) = self.sites.get(&(val_expr as *const Expr))
                     {
@@ -629,7 +443,6 @@ impl Analyzer {
                     }
                     record_ty.push((name.clone(), t));
                 }
-                // Set the site element type so elem_type_of_tbl returns StaticType::Record
                 self.site_elem[id] = Record(record_ty.clone());
                 (Record(record_ty), BTreeSet::from([id]))
             }
@@ -682,7 +495,6 @@ impl Analyzer {
         }
     }
 
-
     fn drop_reference(&mut self, name: &str, stmt: &Stmt) {
         let (depth, bind) = self.resolve(name);
         let roots: Vec<usize> = bind
@@ -700,6 +512,9 @@ impl Analyzer {
         });
         if !roots.is_empty() && sole && self.recording {
             self.free_sites.insert(stmt as *const Stmt);
+            self.trace(trace::TRACE_SHAPE_DROP);
+        } else if !roots.is_empty() && !sole && self.recording {
+            self.trace(trace::TRACE_FAIL_ALIAS_UNION);
         }
         self.scopes[depth].insert(
             name.to_string(),
@@ -710,7 +525,6 @@ impl Analyzer {
             },
         );
     }
-
 
     fn check_table_use(&mut self, obj: &Expr) {
         if let Expr::Identifier(name) = obj {
@@ -723,7 +537,6 @@ impl Analyzer {
             }
         }
     }
-
 
     fn check_uses(&mut self, expr: &Expr) {
         match expr {
@@ -756,8 +569,7 @@ impl Analyzer {
         }
     }
 
-
-            fn check_key_threshold(&mut self, key: &Expr, sites: &BTreeSet<usize>) {
+    fn check_key_threshold(&mut self, key: &Expr, sites: &BTreeSet<usize>) {
         if let Expr::Integer(i) = key {
             if *i >= BOUNDS_FAIL_THRESHOLD {
                 panic!("table index overflow");
@@ -773,13 +585,10 @@ impl Analyzer {
         }
     }
 
-
     fn detect_fill_loop(&mut self, guard: &str, body: &[Stmt]) {
         let mutated = self.collect_mutated_names(body);
         let mut fills = BTreeSet::new();
 
-        // Recursive helper to find fills even inside nested if/do/while blocks.
-        // Uses get_base_identifier to unwrap chains like t[i][j] → "t".
         fn collect_fills(stmts: &[Stmt], guard: &str, mutated: &BTreeSet<String>, fills: &mut BTreeSet<String>) {
             for stmt in stmts {
                 if let Stmt::IndexAssign { obj, key: Expr::Identifier(key_ident), .. } = stmt
@@ -824,7 +633,6 @@ impl Analyzer {
         }
     }
 
-
     fn collect_mutated_names(&self, stmts: &[Stmt]) -> BTreeSet<String> {
         let mut mutated = BTreeSet::new();
         for s in stmts {
@@ -854,23 +662,5 @@ impl Analyzer {
             }
         }
         mutated
-    }
-}
-
-
-fn extract_guard(condition: &Expr) -> Option<&str> {
-    if let Expr::BinaryOp {
-        op: BinOp::LessThan,
-        left,
-        ..
-    } = condition
-    {
-        if let Expr::Identifier(name) = left.as_ref() {
-            Some(name.as_str())
-        } else {
-            None
-        }
-    } else {
-        None
     }
 }
