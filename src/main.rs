@@ -12,6 +12,12 @@ mod shape;
 mod type_checker;
 
 fn main() {
+    // GLM_TRACE pass A: the plate is never truncated, so zero the
+    // high-half counter region (bytes 128..256) once per run — per-run
+    // occurrence counts start from 0 while the sticky low-half
+    // booleans (slot 0/1 build status included) are left untouched.
+    glm_rt::trace::compiler_trace_reset_counts();
+
     // GLM_TRACE bracket: any compile panic records slot 1
     // (EXPECT_BUILD_FAIL) before the abort — write_at is already on
     // disk, so no unwind/catch is needed even with panic=abort. The

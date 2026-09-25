@@ -90,21 +90,36 @@ impl Analyzer {
     fn trace(&self, slot: u8) {
         if self.recording {
             trace::compiler_trace_set(slot);
+            trace::compiler_trace_count(slot);
         }
     }
 
     fn elem_type_of_tbl(&self, id: usize) -> crate::ast::StaticType {
         if self.site_elem[id] == Conflict {
+            // The parent site may have been flagged Conflict by a heterogeneous
+            // IndexAssign (e.g. t_i0_c7, t_i1_c8 → v34[1][1] = string). Check before
+            // rebuilding from children — the children are pure Int tables that never
+            // saw the conflict, so the child_sites path would silently return a valid
+            // Table<Table<Integer>> and ignore the Corruption entirely.
+            self.trace(trace::TRACE_SHAPE_CONFLICT_GUARD);
             panic!("Type Error: heterogeneous tables are not supported.");
         }
 
         if let Record(fields) = &self.site_elem[id] {
+            // [Deep-Free Preservation Strike] A Record site keeps its Record type
+            // even when it has tracked child constructors: the child_sites fast
+            // path below would otherwise retype t_i0_record_data: t_i0_c1,t_i1_c2,t_i2_c3 into
+            // Table(Table(Int)), erasing Record-ness — which stripped the
+            // deep-free flag at lowering and leaked the child.
+            self.trace(trace::TRACE_RECORD_PRESERVED);
             return crate::ast::StaticType::Record(
                 fields.iter().map(|(name, ty)| (name.clone(), self.ty_to_static(ty))).collect()
             );
         }
 
         if let Some(children) = self.child_sites.get(&id) {
+            // Fast path for tracked child constructors: enforce multi-child coherence
+            self.trace(trace::TRACE_CHILD_FAST_PATH);
             let mut uniform_type: Option<crate::ast::StaticType> = None;
 
             for &child_id in children {
@@ -128,6 +143,9 @@ impl Analyzer {
             }
         }
 
+        // missing or empty, resolve from the known site type.
+        // Handle both Tbl(inner) for constructors and scalar types from IndexAssign propagation
+        self.trace(trace::TRACE_FALLBACK_RESOLVE);
         match &self.site_elem[id] {
             Tbl(inner) => crate::ast::StaticType::Table(Box::new(self.ty_to_static(inner))),
             Record(fields) => crate::ast::StaticType::Record(
@@ -369,12 +387,16 @@ impl Analyzer {
     }
 
     fn decide(&mut self, site: usize, vt: &Ty) {
+        // Already in final state — don't re-trigger changed.
+        self.trace(trace::TRACE_DECIDE_VISIT);
         if self.site_elem[site] == Conflict {
             return;
         }
 
         let joined = join_ty(&self.site_elem[site], vt);
         if self.site_elem[site] != joined {
+            // Use join_ty
+            self.trace(trace::TRACE_JOIN_RETYPED);
             self.site_elem[site] = joined.clone();
             self.changed = true;
         }

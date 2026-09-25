@@ -9,3 +9,4 @@ __pycache__/
 .zcodeignore
 glm_runtime_fuzz
 .zcode/plans
+.glm_trace.bin
