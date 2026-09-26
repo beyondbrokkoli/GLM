@@ -47,7 +47,6 @@ pub enum Instruction {
         target: RegId,
         elem: StaticType,
         flags: u8,
-        is_record: bool,
     },
     TableGet {
         target: RegId,
@@ -204,12 +203,8 @@ impl Instruction {
             | Instruction::Eq { .. }
             | Instruction::Not { .. }
             | Instruction::LoadBool { .. } => Some(StaticType::Boolean),
-            Instruction::TableNew { elem, is_record, .. } => {
-                if *is_record {
-                    Some(StaticType::Integer) // records always return Integer from def_type
-                } else {
-                    Some(StaticType::Table(Box::new(elem.clone())))
-                }
+            Instruction::TableNew { elem, .. } => {
+                Some(StaticType::Table(Box::new(elem.clone())))
             }
             Instruction::Move { ty, .. } | Instruction::Phi { ty, .. } => Some(ty.clone()),
             Instruction::TableGet { target_ty, .. } => Some(target_ty.clone()),

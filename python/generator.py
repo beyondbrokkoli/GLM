@@ -268,9 +268,10 @@ def ev(n, m: ScopeEnvironment):
         elements = [ev(e, m) for e in n[2]]
         heap_obj = m.allocate_table(None, elem=elem_type, deep_free=True)
         for idx, val in enumerate(elements):
-            # LUA 1-BASED INDEXING FIX
-            heap_obj.grow(idx + 2)
-            heap_obj.cells[idx + 1] = val 
+            # {[i] = v} entries: 0-indexed in glm AND system lua, so the
+            # model stores cells exactly where both runtimes see them.
+            heap_obj.grow(idx + 1)
+            heap_obj.cells[idx] = val
             if isinstance(val, TableHeap):
                 heap_obj.children.add(val.site_id)
         return heap_obj
@@ -381,7 +382,8 @@ def render(n):
     if t in ("new", "newf"):
         return "{}"
     if t == "table_lit":
-        return "{" + ", ".join(render(e) for e in n[2]) + "}"
+        inner = ", ".join(f"[{i}] = {render(v)}" for i, v in enumerate(n[2]))
+        return "{" + inner + "}"
     if t == "read":
         return f"{n[1]}[{render(n[2])}]"
     if t == "multi_read":
@@ -812,6 +814,31 @@ class GlmLuaGenerator:
                 nodes.append(stmt)
         return nodes
 
+    def gen_ctor_decl(self):
+        """Scalar-array constructor literal ({[0] = v, ...}): exercises
+        the Lua-style constructor end to end inside the differential
+        harness — bracket keys are 0-indexed in both runtimes."""
+        elem = self.r.choice(["int", "float"])
+        n = self.r.randint(2, 4)
+        if elem == "int":
+            vals = [("lit", self.r.randint(-2, 15)) for _ in range(n)]
+        else:
+            vals = [("lit", self.gen_literal("float")) for _ in range(n)]
+        name = self.fresh()
+        lit = ("table_lit", elem, vals)
+        self.emit_exec(("local", name, lit))
+        nodes = [("local", name, lit)]
+        tables = self.table_names()
+        if len(tables) >= 2 and self.r.random() < 0.4:
+            same = [t for t in tables if t != name and self.m.get_var_binding(t).elem == elem]
+            if same:
+                src = self.r.choice(same)
+                alias = self.fresh()
+                st = ("local", alias, ("var", src))
+                self.emit_exec(st)
+                nodes.append(st)
+        return nodes
+
     def gen_scalar_decl(self, depth):
         typ = self.r.choice(["int", "int", "float", "str", "bool"])
         v = self.fresh()
@@ -834,7 +861,10 @@ class GlmLuaGenerator:
         return [("local", v, e)]
 
     def gen_local_decl(self, depth):
-        if self.r.random() < 0.25 and self.live_roots() < MAX_ROOTS:
+        roll = self.r.random()
+        if roll < 0.10 and self.live_roots() < MAX_ROOTS:
+            return self.gen_ctor_decl()
+        if roll < 0.25 and self.live_roots() < MAX_ROOTS:
             return self.gen_table_decl()
         return self.gen_scalar_decl(depth)
 
@@ -1258,17 +1288,17 @@ class GlmLuaGenerator:
         return [stmt]
 
     def gen_inline_matrix(self):
-        """Generates store-built 2D tables (constructor cut: populated
-        literals are rejected at parse, so rows are fresh {} tables
-        stored into the outer spine — 0-based in glm AND system lua)."""
+        """Generates 2D tables with constructor-built rows ({[i] = v}
+        literals, 0-based in glm AND system lua) stored into a store-
+        built outer spine — the named-row ownership shape the corpus
+        pins in ctor_nested."""
         v = self.fresh()
         rows, cols = self.r.randint(2, 4), self.r.randint(2, 4)
         self.emit_exec(("local", v, ("new",)))
         for r in range(rows):
             row = self.fresh()
-            self.emit_exec(("local", row, ("new",)))
-            for c in range(cols):
-                self.emit_exec(("store", row, ("lit", c), ("lit", self.r.randint(0, 10))))
+            vals = [("lit", self.r.randint(0, 10)) for _ in range(cols)]
+            self.emit_exec(("local", row, ("table_lit", "int", vals)))
             self.emit_exec(("store", v, ("lit", r), ("var", row)))
         # Keep the model's elem honest (the old table_lit allocated with
         # this elem): emit_sinks only prints scalar-elem tables, and a

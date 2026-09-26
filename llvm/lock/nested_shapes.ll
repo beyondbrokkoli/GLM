@@ -58,8 +58,7 @@ b0:
   call void @glm_tbl_set(ptr %v0, i64 %v2, ptr %ts0.valp)
   %v7 = add i64 0, 0
   call void @glm_tbl_get(ptr %v0, i64 %v7, ptr %ts1.dst)
-  %ts1.loaded = load i64, ptr %ts1.dst
-%v5 = inttoptr i64 %ts1.loaded to ptr
+  %v5 = load ptr, ptr %ts1.dst
   %v8 = add i64 0, 0
   call void @glm_tbl_get(ptr %v5, i64 %v8, ptr %ts2.dst)
   %v4 = load i64, ptr %ts2.dst
@@ -73,8 +72,7 @@ b0:
   call void @glm_tbl_set(ptr %v10, i64 %v12, ptr %ts3.valp)
   %v17 = add i64 0, 0
   call void @glm_tbl_get(ptr %v10, i64 %v17, ptr %ts4.dst)
-  %ts4.loaded = load i64, ptr %ts4.dst
-%v15 = inttoptr i64 %ts4.loaded to ptr
+  %v15 = load ptr, ptr %ts4.dst
   %v18 = add i64 0, 0
   call void @glm_tbl_get(ptr %v15, i64 %v18, ptr %ts5.dst)
   %v14 = load i64, ptr %ts5.dst
@@ -109,8 +107,7 @@ b0:
   call void @glm_tbl_set(ptr %v33, i64 %v38, ptr %ts11.valp)
   %v43 = add i64 0, 0
   call void @glm_tbl_get(ptr %v33, i64 %v43, ptr %ts12.dst)
-  %ts12.loaded = load i64, ptr %ts12.dst
-%v41 = inttoptr i64 %ts12.loaded to ptr
+  %v41 = load ptr, ptr %ts12.dst
   %v44 = add i64 0, 0
   call void @glm_tbl_get(ptr %v41, i64 %v44, ptr %ts13.dst)
   %v40 = load i64, ptr %ts13.dst
@@ -118,8 +115,7 @@ b0:
   call void @glm_print_nl()
   %v48 = add i64 0, 0
   call void @glm_tbl_get(ptr %v33, i64 %v48, ptr %ts14.dst)
-  %ts14.loaded = load i64, ptr %ts14.dst
-%v46 = inttoptr i64 %ts14.loaded to ptr
+  %v46 = load ptr, ptr %ts14.dst
   %v49 = add i64 0, 1
   call void @glm_tbl_get(ptr %v46, i64 %v49, ptr %ts15.dst)
   %v45 = load i64, ptr %ts15.dst
@@ -127,8 +123,7 @@ b0:
   call void @glm_print_nl()
   %v53 = add i64 0, 1
   call void @glm_tbl_get(ptr %v33, i64 %v53, ptr %ts16.dst)
-  %ts16.loaded = load i64, ptr %ts16.dst
-%v51 = inttoptr i64 %ts16.loaded to ptr
+  %v51 = load ptr, ptr %ts16.dst
   %v54 = add i64 0, 0
   call void @glm_tbl_get(ptr %v51, i64 %v54, ptr %ts17.dst)
   %v50 = load i64, ptr %ts17.dst
@@ -136,8 +131,7 @@ b0:
   call void @glm_print_nl()
   %v58 = add i64 0, 1
   call void @glm_tbl_get(ptr %v33, i64 %v58, ptr %ts18.dst)
-  %ts18.loaded = load i64, ptr %ts18.dst
-%v56 = inttoptr i64 %ts18.loaded to ptr
+  %v56 = load ptr, ptr %ts18.dst
   %v59 = add i64 0, 1
   call void @glm_tbl_get(ptr %v56, i64 %v59, ptr %ts19.dst)
   %v55 = load i64, ptr %ts19.dst
@@ -173,16 +167,14 @@ b0:
   call void @glm_tbl_set(ptr %v74, i64 %v79, ptr %ts25.valp)
   %v83 = add i64 0, 0
   call void @glm_tbl_get(ptr %v74, i64 %v83, ptr %ts26.dst)
-  %ts26.loaded = load i64, ptr %ts26.dst
-%v81 = inttoptr i64 %ts26.loaded to ptr
+  %v81 = load ptr, ptr %ts26.dst
   %v84 = add i64 0, 0
   %v85 = add i64 0, 42
   store i64 %v85, ptr %ts27.valp
   call void @glm_tbl_set(ptr %v81, i64 %v84, ptr %ts27.valp)
   %v89 = add i64 0, 0
   call void @glm_tbl_get(ptr %v74, i64 %v89, ptr %ts28.dst)
-  %ts28.loaded = load i64, ptr %ts28.dst
-%v87 = inttoptr i64 %ts28.loaded to ptr
+  %v87 = load ptr, ptr %ts28.dst
   %v90 = add i64 0, 0
   call void @glm_tbl_get(ptr %v87, i64 %v90, ptr %ts29.dst)
   %v86 = load i64, ptr %ts29.dst
@@ -190,8 +182,7 @@ b0:
   call void @glm_print_nl()
   %v94 = add i64 0, 0
   call void @glm_tbl_get(ptr %v74, i64 %v94, ptr %ts30.dst)
-  %ts30.loaded = load i64, ptr %ts30.dst
-%v92 = inttoptr i64 %ts30.loaded to ptr
+  %v92 = load ptr, ptr %ts30.dst
   %v95 = add i64 0, 1
   call void @glm_tbl_get(ptr %v92, i64 %v95, ptr %ts31.dst)
   %v91 = load i64, ptr %ts31.dst
@@ -199,8 +190,7 @@ b0:
   call void @glm_print_nl()
   %v99 = add i64 0, 1
   call void @glm_tbl_get(ptr %v74, i64 %v99, ptr %ts32.dst)
-  %ts32.loaded = load i64, ptr %ts32.dst
-%v97 = inttoptr i64 %ts32.loaded to ptr
+  %v97 = load ptr, ptr %ts32.dst
   %v100 = add i64 0, 0
   call void @glm_tbl_get(ptr %v97, i64 %v100, ptr %ts33.dst)
   %v96 = load i64, ptr %ts33.dst
@@ -208,8 +198,7 @@ b0:
   call void @glm_print_nl()
   %v104 = add i64 0, 1
   call void @glm_tbl_get(ptr %v74, i64 %v104, ptr %ts34.dst)
-  %ts34.loaded = load i64, ptr %ts34.dst
-%v102 = inttoptr i64 %ts34.loaded to ptr
+  %v102 = load ptr, ptr %ts34.dst
   %v105 = add i64 0, 1
   call void @glm_tbl_get(ptr %v102, i64 %v105, ptr %ts35.dst)
   %v101 = load i64, ptr %ts35.dst

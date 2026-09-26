@@ -50,9 +50,9 @@ runs these contract checks for you.
 
 | pass | signals | scope-tagged |
 |---|---|---|
-| parser | 69, 84 | no (runs before the scope walk) |
-| shape analyzer | 2–9, 31–49, 51–59, 61–68, 80, 85–89, 91–125 | yes |
-| type checker | 73–78 | no (analyzer owns the ids) |
+| parser | 69, 83, 84 | no (runs before the scope walk) |
+| shape analyzer | 2–9, 31–49, 51–59, 61–68, 80, 89, 91–125 | yes |
+| type checker | 73, 76, 77 | no (analyzer owns the ids) |
 | lowerer | 5–7 (do-exit emission), 72 | 5–7 root scope; 72 scope 0 on bail |
 | backend | 30, 81 | boolean-only |
 | runtime | 50, 60, 70, 90 (sidecar) | boolean-only |
@@ -138,7 +138,8 @@ Lattice: infer / join / decide
   — ctor element scan.
 - 111 INFER_TBL_CONFLICT **(conv)** — heterogeneous ctor flagged.
 - 113 INFER_TBL_RESOLVED / 114 INFER_TBL_PENDING — ctor exit state.
-- 115 INFER_REC_CHILD — record field holds a table (child site).
+- 115 INFER_REC_CHILD **(dead: record machinery removed)** —
+  was: record field holds a table (child site).
 - 116 INFER_IDX_BAD_KEY / 117 INFER_IDX_BAD_OBJ / 118 INFER_IDX_VALID
   — index typing (117 fires on post-drop reads).
 - 59 RESOLVE_FOUND — name resolution hit.
@@ -148,8 +149,8 @@ Resolution (post-fixpoint)
 - 28 ANALYZE_PENDING — site never decided → Unknown.
 - 29 ANALYZE_RESOLVED — site classified.
 - 21 SHAPE_CONFLICT_GUARD — Conflict guard in elem_type_of_tbl.
-- 22 RECORD_PRESERVED **(dead: constructor cut)** — Record beats the
-  child fast path.
+- 22 RECORD_PRESERVED **(dead: record machinery removed)** —
+  nothing constructs records; a fire means a zombie arm came back.
 - 23 CHILD_FAST_PATH — multi-child coherence path taken.
 - 24 FALLBACK_RESOLVE — final match fallback taken.
 - 91 ELEM_CHILD_CONFLICT **(dead)** — parent conflicts first.
@@ -166,30 +167,32 @@ Resolution (post-fixpoint)
   **(dead: join_ty flattens Tbl(Conflict) before resolution sees it)**
   — Ty→StaticType.
 
-Constructor census
-- 82 PARSE_REC_CTOR / 83 PARSE_TBL_CTOR **(dead: constructor cut —
-  populated literals are rejected at parse; only `{}` parses)** /
-  84 PARSE_TBL_EMPTY — one per literal parsed (84 is the F9/Pending
-  tripwire for the future Lua-syntax constructor work).
-- 85 REC_CTOR / 86 REC_FIELD / 87 REC_NESTED **(dead: constructor
-  cut)** — record sites/fields/nesting at inference.
-- 88 STMT_IDX_REC_VALUE **(dead: constructor cut)** — record stored
-  into a table (BS-11 enabler).
+Constructor census (Lua-style constructor landed: positional entries
+fill slots 0..n-1, `{[k] = v}` takes constant integer slots, duplicate
+slots/named keys/dynamic keys are parse errors)
+- 82 PARSE_REC_CTOR **(dead: record machinery removed; the `{k: v}`
+  spelling is a plain syntax error)** / 83 PARSE_TBL_CTOR — populated
+  literal parsed / 84 PARSE_TBL_EMPTY — `{}` parsed (Pending/F9 root).
+- 85 REC_CTOR / 86 REC_FIELD / 87 REC_NESTED **(dead: record machinery
+  removed)** — were: record sites/fields/nesting at inference.
+- 88 STMT_IDX_REC_VALUE **(dead: record machinery removed)** — was the
+  BS-11 enabler.
 - 89 STMT_IDX_TBL_VALUE — table stored into a table (deep-free edge).
 
 Checker (scope-less by design)
 - 73 GHOST_BAIL_CHECKER — first checker error poisons the block.
-- 74 CHK_IDX_REC_FIELD0 — every record index typed by field 0 (BS-5
-  marker; fires + passing build = wrong-slot write compiled).
-- 75 CHK_REC_EQ — record ==/~= passed compatibility (clang will reject).
+- 74 CHK_IDX_REC_FIELD0 **(dead: record machinery removed)** —
+  was the BS-5 marker.
+- 75 CHK_REC_EQ **(dead: record machinery removed)**.
 - 76 CHK_UNIFY — Unknown type variable bound.
 - 77 CHK_NIL_EXPR — nil in expression position.
-- 78 CHK_PRINT_REC — record reached the print gate (BS-6 marker).
+- 78 CHK_PRINT_REC **(dead: record machinery removed)**.
 
 Analyzer use-checks
 - 12 CHK_TBL_IDENT — table-use check on an identifier.
 - 13 CHK_TBL_NIL — possibly-nil guard (the `t = nil` poisoning).
-- 14 CHK_USE_TBL / 15 CHK_USE_REC / 16 CHK_USE_IDX /
+- 14 CHK_USE_TBL / 15 CHK_USE_REC **(dead: record machinery
+  removed)** / 16 CHK_USE_IDX /
   17 CHK_USE_UNOP_LEN / 18 CHK_USE_BINOP — check_uses dispatch.
 
 Key thresholds
@@ -211,10 +214,11 @@ Backend / runtime (boolean-only)
 - 90 FAIL_LEAK_DETECTED — nonzero ALLOC_COUNT at process exit.
 
 Free slots (book nothing here without checking the file first):
-71, 79, 126–127. Reusing **(dead)** slots (22, 57, 58, 74, 75, 78, 82,
-83, 85–88, 91, 93, 97, 102) is acceptable only if the 127-slot cap is
-approached — it costs their alarm value. The constructor-cut dead slots
-revive when the Lua-style constructor redesign lands.
+71, 79, 126–127. The record family (15, 22, 57, 74, 75, 78, 82,
+85–88, 97, 115) is dead with the machinery REMOVED — permanently
+retired, free for reuse. Still-alive-alarm dead slots: 58, 91, 93,
+102 (a fire means the analyzer structure changed). 83 revived with the
+Lua-style constructor.
 
 ### 1.4 Pinned bug fingerprints
 
@@ -227,7 +231,10 @@ its pinned case. A refactor that moves one shows up as a delta there.
 | do_exit_alias_survives_rejected (contained) | DO_EXIT_ALIAS_SURVIVES + GHOST_BAIL |
 | do_exit_join_hazard_leak (contained leak) | DO_EXIT_FREE_SITE(2) + DO_EXIT_FREE_DEFREG(1) + DO_EXIT_JOIN_LEAK(1) |
 | nil_free_stale_redrop (killed-site proof) | SHAPE_DROP(1) + DROP_STALE_SITE(2) |
-| record_* ctor-cut guards (9 files) | GHOST_BAIL_PARSER(1), nothing else — the parse rejection is the pin; re-acceptance fires the record signals (22, 74, 75, 78, 85–88) and fails the pin |
+| record_* colon guards (9 files) | GHOST_BAIL_PARSER(1), nothing else — the `{k: v}` parse rejection is the pin (the record signals are retired with the machinery) |
+| ctor_mixed/nested_mixed/scalar_table_mix/int_float_mix | INFER_TBL_MISMATCH(1) + INFER_TBL_CONFLICT(1) + SHAPE_CONFLICT_GUARD(1) — the heterogeneous refusal fingerprint |
+| ctor_named_key/dup_index/dyn_key_rejected | GHOST_BAIL_PARSER(1) — parse-level, exactly the record_* shape |
+| ctor_in_table_leak (BS-11 successor) | STMT_IDX_TBL_VALUE(1); sys_alloc_count prints 1 — the bounded stored-ctor leak, pinned knowingly |
 
 Fixed-by-refactor (kept as regression pins):
 `do_exit_alias_double_free_crash` — DO_EXIT_FREE_SITE + DO_EXIT_

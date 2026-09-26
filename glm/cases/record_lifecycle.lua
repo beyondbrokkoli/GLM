@@ -1,10 +1,10 @@
--- glm/cases/record_lifecycle.lua
--- combo (former): the record lifetime story — block-exit frees, deep-free of inline children, the allocation counter.
+-- record_lifecycle.lua: former record lifetime combo
 --
--- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
--- at parse until the Lua-style constructor redesign lands. The case
--- stays as a guard — the k: v spelling must not silently re-accept.
--- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
+-- RECORD SYNTAX GUARD: the {k: v} spelling was removed with the record
+-- machinery (named-key constructors and mixed-type layouts are
+-- not glm's model). The parse must reject it here —
+-- re-acceptance of the colon form is the regression this pin catches.
+-- EXPECT_BUILD_FAIL: Syntax Error: record syntax
 do
 local r = { x: 1, name: "a" }
 end

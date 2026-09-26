@@ -1,10 +1,10 @@
--- glm/cases/record_permuted_keys_conflict.lua
--- (former) permuted field order joined cleanly — fields sorted at parse.
+-- record_permuted_keys_conflict.lua: former permuted-field-order join pin
 --
--- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
--- at parse until the Lua-style constructor redesign lands. The case
--- stays as a guard — the field canonicalization returns with the redesign.
--- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
+-- RECORD SYNTAX GUARD: the {k: v} spelling was removed with the record
+-- machinery (named-key constructors and mixed-type layouts are
+-- not glm's model). The parse must reject it here —
+-- re-acceptance of the colon form is the regression this pin catches.
+-- EXPECT_BUILD_FAIL: Syntax Error: record syntax
 local a = { name: "alpha", x: 1 }
 local b = { x: 2, name: "beta" }
 print(a[0], b[0])

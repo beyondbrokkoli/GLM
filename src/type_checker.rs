@@ -134,16 +134,12 @@ impl<'a> TypeChecker<'a> {
             Stmt::Assignment { name, expr } => {
                 let expected = self.var_type(name)?;
                 if matches!(expr, Expr::Nil) {
-                    // [Lifecycle Parity Strike] Records are heap GlmTables
-                    // exactly like tables, so they are valid nil-release
+                    // Tables are the heap values and the valid nil-release
                     // targets: the shape layer's sole-ownership proof and
                     // the lowerer's TableFree emission are type-agnostic.
                     // A bare local (unbound Unknown) holds nil already —
                     // releasing it is a no-op, not a type error.
-                    if !matches!(
-                        expected,
-                        StaticType::Table(_) | StaticType::Record(_) | StaticType::Unknown(_)
-                    ) {
+                    if !matches!(expected, StaticType::Table(_) | StaticType::Unknown(_)) {
                         return Err(format!(
                             "Type Error: 'nil' releases tables — '{}' is a {}",
                             name,
@@ -234,11 +230,6 @@ impl<'a> TypeChecker<'a> {
             Stmt::Print { exprs } => {
                 for e in exprs {
                     let ty = self.check_expr(e)?;
-                    // BS-6 marker: a record passes this gate (only Table is
-                    // rejected here) and dies later at IR generation.
-                    if matches!(ty, StaticType::Record(_)) {
-                        signal!(trace::TRACE_CHK_PRINT_REC);
-                    }
                     if matches!(ty, StaticType::Table(_)) {
                         return Err(
                             "Type Error: cannot print a table — print its cells or '#t' instead"
@@ -257,18 +248,6 @@ impl<'a> TypeChecker<'a> {
             StaticType::Table(elem) => {
                 let desc = type_name(&StaticType::Table(elem.clone()));
                 Ok((*elem, desc))
-            }
-            StaticType::Record(fields) => {
-                // Records are stored as tables internally — field 0 = first value, etc.
-                // Element type is the first field's type.
-                // BS-5 marker: every record index (read AND write) is checked
-                // against field 0's type — the hole that lets a field-0-typed
-                // value compile into any slot.
-                signal!(trace::TRACE_CHK_IDX_REC_FIELD0);
-                let first_ty = fields.first().map(|(_, ty)| ty.clone())
-                    .unwrap_or(StaticType::Integer);
-                let desc = type_name(&StaticType::Table(Box::new(first_ty.clone())));
-                Ok((first_ty, desc))
             }
             _ => Err(format!(
                 "Type Error: cannot index {} — only tables support '[]'",
@@ -305,9 +284,9 @@ impl<'a> TypeChecker<'a> {
                         .to_string(),
                 )
             }
-            Expr::TableCtor(elems) => {
+            Expr::TableCtor(entries) => {
                 let elem = self.shape.elem_of(expr);
-                for e in elems {
+                for (_, e) in entries {
                     let ty = self.check_expr(e)?;
                     // Allow nested table types — the runtime supports deep-free.
                     if matches!(elem, StaticType::Table(_)) && matches!(ty, StaticType::Table(_)) {
@@ -332,14 +311,6 @@ impl<'a> TypeChecker<'a> {
                     }
                 }
                 Ok(StaticType::Table(Box::new(elem)))
-            }
-            Expr::RecordCtor(fields) => {
-                let mut record_types: Vec<(String, StaticType)> = Vec::with_capacity(fields.len());
-                for (name, val_expr) in fields.iter() {
-                    let val_ty = self.check_expr(val_expr)?;
-                    record_types.push((name.to_string(), val_ty));
-                }
-                Ok(StaticType::Record(record_types))
             }
             Expr::Index { obj, key } => {
                 let (elem, _) = self.check_index_base(obj)?;
@@ -383,12 +354,6 @@ impl<'a> TypeChecker<'a> {
                     BinOp::Equal | BinOp::NotEqual => {
                         if l == StaticType::String || r == StaticType::String {
                             return Err("Type Error: String comparison is not supported yet".to_string());
-                        }
-                        // C.4 marker: record == record passes compatibility
-                        // here, then the backend compares the registers as
-                        // i64 while they hold ptr — clang rejects.
-                        if matches!(l, StaticType::Record(_)) && matches!(r, StaticType::Record(_)) {
-                            signal!(trace::TRACE_CHK_REC_EQ);
                         }
                         if !types_compatible(&l, &r) {
                             return Err(format!(
@@ -466,9 +431,6 @@ impl<'a> TypeChecker<'a> {
             StaticType::Table(inner) => {
                 StaticType::Table(Box::new(self.resolve_var(inner)))
             }
-            StaticType::Record(fields) => StaticType::Record(
-                fields.iter().map(|(name, ty)| (name.clone(), self.resolve_var(ty))).collect()
-            ),
             other => other.clone(),
         }
     }
@@ -528,27 +490,9 @@ fn types_compatible(l: &StaticType, r: &StaticType) -> bool {
         (StaticType::Unknown(_), _) | (_, StaticType::Unknown(_)) => true,
         // Two tables are compatible if their inner element types are compatible.
         (StaticType::Table(e1), StaticType::Table(e2)) => types_compatible(e1, e2),
-        // Two records are compatible if their inner field types are compatible.
-        (StaticType::Record(f1), StaticType::Record(f2)) => types_compatible_records(f1, f2),
         // Everything else is a conflict.
         _ => false,
     }
-}
-
-fn types_compatible_records(f1: &[(String, StaticType)], f2: &[(String, StaticType)]) -> bool {
-    if f1.len() != f2.len() {
-        return false;
-    }
-    for (name1, ty1) in f1 {
-        if let Some((_, ty2)) = f2.iter().find(|(n, _)| n == name1) {
-            if !types_compatible(ty1, ty2) {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-    true
 }
 
 fn type_name(ty: &StaticType) -> String {
@@ -565,12 +509,6 @@ fn type_name(ty: &StaticType) -> String {
                 StaticType::Unknown(_) => "Table<?>".to_string(),
                 _ => format!("Table of {}", type_name(elem)),
             },
-            StaticType::Record(fields) => {
-                let parts: Vec<String> = fields.iter()
-                    .map(|(name, ty)| format!("{}:{}", name, type_name(ty)))
-                    .collect();
-                format!("Record<{}>", parts.join(", "))
-            }
         StaticType::Unknown(_) => "?".to_string(),
     }
 }

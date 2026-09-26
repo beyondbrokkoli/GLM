@@ -1,6 +1,8 @@
 // src/parser.rs
 use crate::ast::{BinOp, Expr, Stmt, UnOp};
 use crate::lexer::Token;
+use crate::shape::BOUNDS_FAIL_THRESHOLD;
+use std::collections::BTreeSet;
 use std::iter::Peekable;
 
 pub struct ParseError(pub String);
@@ -369,29 +371,7 @@ impl<'a> Parser<'a> {
             Some(Token::True) => Ok(Expr::Boolean(true)),
             Some(Token::False) => Ok(Expr::Boolean(false)),
             Some(Token::Nil) => Ok(Expr::Nil),
-            Some(Token::LeftBrace) => {
-                // [Constructor Cut] Only the empty literal `{}` parses.
-                // Populated constructors — `{e1, e2, ...}` tables and
-                // `{k: v, ...}` records — shipped half-designed with the
-                // record feature and are OFF until the Lua-style
-                // redesign (`[k] = v`, `k = v` entries) lands: build
-                // tables with stores (`local t = {}` then `t[i] = v`)
-                // instead. The rejection is a syntax error, so the whole
-                // file ghosts out here (GHOST_BAIL_PARSER) exactly like
-                // any other parse failure.
-                if !matches!(self.tokens.peek(), Some(Token::RightBrace)) {
-                    return Err(ParseError(
-                        "Syntax Error: populated constructors are not supported — use 'local t \
-                         = {}' and 't[i] = v' stores (constructor redesign pending)"
-                            .into(),
-                    ));
-                }
-                self.tokens.next();
-                // Constructor census for the map: the empty literal is
-                // the Pending/F9 root (it can never join a record site).
-                glm_rt::trace::compiler_trace_signal(glm_rt::trace::TRACE_PARSE_TBL_EMPTY);
-                Ok(Expr::TableCtor(Vec::new()))
-            }
+            Some(Token::LeftBrace) => self.parse_table_ctor(),
             Some(Token::String(s)) => Ok(Expr::String(s.trim_matches('"').to_string())),
             Some(Token::Identifier(name)) => {
                 if name == "sys_alloc_count" && matches!(self.tokens.peek(), Some(Token::LeftParen)) {
@@ -407,6 +387,108 @@ impl<'a> Parser<'a> {
                 Ok(inner)
             }
             _ => Err(ParseError("Syntax Error: Expected expression".into())),
+        }
+    }
+
+    /// The Lua-style table constructor (Lua 5.4 §3.4.9 grammar, glm
+    /// dialect):
+    ///
+    ///   ctor  := '{' entry (',' entry)* ','? '}'
+    ///   entry := '[' INT ']' '=' exp   -- explicit constant slot
+    ///          | exp                    -- positional (slots 0..n-1)
+    ///
+    /// Dialect decisions (pinned in glm/cases/ctor_*.lua):
+    ///   - Positional entries fill slots 0..n-1 — glm is 0-indexed, and
+    ///     the positional counter ignores `[k]` entries exactly like
+    ///     Lua's (the counters are independent).
+    ///   - A slot written twice is a Syntax Error. Lua's last-wins is
+    ///     deliberately NOT glm's rule: a silent overwrite inside a
+    ///     literal is where heterogeneous shapes used to hide.
+    ///   - Named keys (`{x = v}`), non-constant keys (`{[i] = v}`) and
+    ///     the removed record syntax (`{k: v}`) are rejected loudly —
+    ///     each with its own message so the pins name the intent.
+    fn parse_table_ctor(&mut self) -> Result<Expr, ParseError> {
+        // parse_primary's match already consumed the '{'.
+        if matches!(self.tokens.peek(), Some(Token::RightBrace)) {
+            self.tokens.next();
+            // Constructor census for the map: the empty literal is the
+            // Pending/F9 root — element type still decided by first touch.
+            glm_rt::trace::compiler_trace_signal(glm_rt::trace::TRACE_PARSE_TBL_EMPTY);
+            return Ok(Expr::TableCtor(Vec::new()));
+        }
+
+        let mut entries: Vec<(i64, Expr)> = Vec::new();
+        let mut slots: BTreeSet<i64> = BTreeSet::new();
+        let mut next_pos: i64 = 0;
+        loop {
+            let (slot, value) = self.parse_ctor_entry(&mut next_pos)?;
+            if !slots.insert(slot) {
+                return Err(ParseError(format!(
+                    "Syntax Error: duplicate index {slot} in constructor — each slot may be \
+                     written once (last-wins is not glm's rule)"
+                )));
+            }
+            entries.push((slot, value));
+            if matches!(self.tokens.peek(), Some(Token::Comma)) {
+                self.tokens.next();
+                if matches!(self.tokens.peek(), Some(Token::RightBrace)) {
+                    break; // trailing comma, as in Lua
+                }
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::RightBrace)?;
+        glm_rt::trace::compiler_trace_signal(glm_rt::trace::TRACE_PARSE_TBL_CTOR);
+        Ok(Expr::TableCtor(entries))
+    }
+
+    fn parse_ctor_entry(&mut self, next_pos: &mut i64) -> Result<(i64, Expr), ParseError> {
+        if matches!(self.tokens.peek(), Some(Token::LeftBracket)) {
+            self.tokens.next(); // '['
+            let key = match self.tokens.next() {
+                Some(Token::Integer(k)) => k,
+                _ => {
+                    return Err(ParseError(
+                        "Syntax Error: constructor keys must be constant non-negative integers \
+                         — {[index] = value}"
+                            .into(),
+                    ))
+                }
+            };
+            self.expect(Token::RightBracket)?;
+            self.expect(Token::Assign)?;
+            if key >= BOUNDS_FAIL_THRESHOLD {
+                return Err(ParseError(
+                    "Table Bounds Error: table index overflow".into(),
+                ));
+            }
+            let value = self.parse_expr()?;
+            Ok((key, value))
+        } else {
+            let value = self.parse_expr()?;
+            match self.tokens.peek() {
+                Some(Token::Colon) => Err(ParseError(
+                    "Syntax Error: record syntax ({k: v}) was removed — constructors are \
+                     {[index] = value} entries or positional values"
+                        .into(),
+                )),
+                Some(Token::Assign) => {
+                    let name = match &value {
+                        Expr::Identifier(n) => n.clone(),
+                        _ => "name".to_string(),
+                    };
+                    Err(ParseError(format!(
+                        "Syntax Error: named keys ({{{name} = v}}) are not supported yet — use \
+                         an explicit integer key: {{[0] = v}}"
+                    )))
+                }
+                _ => {
+                    let slot = *next_pos;
+                    *next_pos += 1;
+                    Ok((slot, value))
+                }
+            }
         }
     }
 }

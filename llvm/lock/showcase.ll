@@ -361,16 +361,13 @@ b21:
   %v146 = getelementptr inbounds [7 x i8], ptr @.str.19, i64 0, i64 0
   %v149 = add i64 0, 0
   call void @glm_tbl_get(ptr %v136, i64 %v149, ptr %ts19.dst)
-  %ts19.loaded = load i64, ptr %ts19.dst
-%v147 = inttoptr i64 %ts19.loaded to ptr
+  %v147 = load ptr, ptr %ts19.dst
   %v152 = add i64 0, 1
   call void @glm_tbl_get(ptr %v136, i64 %v152, ptr %ts20.dst)
-  %ts20.loaded = load i64, ptr %ts20.dst
-%v150 = inttoptr i64 %ts20.loaded to ptr
+  %v150 = load ptr, ptr %ts20.dst
   %v155 = add i64 0, 2
   call void @glm_tbl_get(ptr %v136, i64 %v155, ptr %ts21.dst)
-  %ts21.loaded = load i64, ptr %ts21.dst
-%v153 = inttoptr i64 %ts21.loaded to ptr
+  %v153 = load ptr, ptr %ts21.dst
   call void @glm_print_string(ptr %v146)
   call void @glm_print_sep()
   call void @glm_print_string(ptr %v147)

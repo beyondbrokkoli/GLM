@@ -1,10 +1,10 @@
--- glm/cases/record_use_after_drop_rejected.lua
--- (former) reads through a nil-dropped record name rejected at compile time.
+-- record_use_after_drop_rejected.lua: former drop-poisoning rejection pin
 --
--- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
--- at parse until the Lua-style constructor redesign lands. The case
--- stays as a guard — the drop poisoning returns with the redesign.
--- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
+-- RECORD SYNTAX GUARD: the {k: v} spelling was removed with the record
+-- machinery (named-key constructors and mixed-type layouts are
+-- not glm's model). The parse must reject it here —
+-- re-acceptance of the colon form is the regression this pin catches.
+-- EXPECT_BUILD_FAIL: Syntax Error: record syntax
 do
 local r = { x: 1, name: "a" }
 r = nil

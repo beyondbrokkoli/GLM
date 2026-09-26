@@ -1,10 +1,10 @@
--- glm/cases/record_in_table_first_touch_leak.lua
--- (former leak pin, BS-11) a record stored into a table never freed — no ownership edge for stored values.
+-- record_in_table_first_touch_leak.lua: former BS-11 stored-record leak pin
 --
--- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
--- at parse until the Lua-style constructor redesign lands. The case
--- stays as a guard — the stored-value ownership returns with the redesign; the ctor rejection fires first today.
--- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
+-- RECORD SYNTAX GUARD: the {k: v} spelling was removed with the record
+-- machinery (named-key constructors and mixed-type layouts are
+-- not glm's model). The parse must reject it here —
+-- re-acceptance of the colon form is the regression this pin catches.
+-- EXPECT_BUILD_FAIL: Syntax Error: record syntax
 do
 local m = {}
 m[0] = { x: 1, name: "a" }

@@ -264,12 +264,10 @@ b6:
   call void @glm_tbl_set(ptr %v109, i64 %v114, ptr %ts32.valp)
   %v118 = add i64 0, 0
   call void @glm_tbl_get(ptr %v109, i64 %v118, ptr %ts33.dst)
-  %ts33.loaded = load i64, ptr %ts33.dst
-%v116 = inttoptr i64 %ts33.loaded to ptr
+  %v116 = load ptr, ptr %ts33.dst
   %v121 = add i64 0, 1
   call void @glm_tbl_get(ptr %v109, i64 %v121, ptr %ts34.dst)
-  %ts34.loaded = load i64, ptr %ts34.dst
-%v119 = inttoptr i64 %ts34.loaded to ptr
+  %v119 = load ptr, ptr %ts34.dst
   %v122 = call i64 @glm_tbl_len(ptr %v109)
   call void @glm_print_string(ptr %v116)
   call void @glm_print_sep()
@@ -280,8 +278,7 @@ b6:
   %v124 = getelementptr i8, ptr %v109, i64 0
   %v127 = add i64 0, 1
   call void @glm_tbl_get(ptr %v124, i64 %v127, ptr %ts36.dst)
-  %ts36.loaded = load i64, ptr %ts36.dst
-%v125 = inttoptr i64 %ts36.loaded to ptr
+  %v125 = load ptr, ptr %ts36.dst
   call void @glm_print_string(ptr %v125)
   call void @glm_print_nl()
   call void @glm_tbl_free(ptr %v109)

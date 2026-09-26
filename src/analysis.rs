@@ -72,17 +72,10 @@ fn number_stmt(stmt: &Stmt, sites: &mut BTreeMap<*const Expr, usize>) {
 
 fn number_expr(expr: &Expr, sites: &mut BTreeMap<*const Expr, usize>) {
     match expr {
-        Expr::TableCtor(elems) => {
+        Expr::TableCtor(entries) => {
             let id = sites.len();
             sites.insert(expr as *const Expr, id);
-            for e in elems {
-                number_expr(e, sites);
-            }
-        }
-        Expr::RecordCtor(fields) => {
-            let id = sites.len();
-            sites.insert(expr as *const Expr, id);
-            for (_, val) in fields {
+            for (_, val) in entries {
                 number_expr(val, sites);
             }
         }

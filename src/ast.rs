@@ -1,13 +1,12 @@
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StaticType {
-    Integer, 
-    Float,   
-    Boolean, 
-    String,  
+    Integer,
+    Float,
+    Boolean,
+    String,
     Table(Box<StaticType>),
     Unknown(usize),
-    Record(Vec<(String, StaticType)>),
 }
 
 impl std::fmt::Display for StaticType {
@@ -19,12 +18,6 @@ impl std::fmt::Display for StaticType {
             StaticType::String => write!(f, "String"),
             StaticType::Table(inner) => write!(f, "Table<{}>", inner),
             StaticType::Unknown(_) => write!(f, "?"),
-            StaticType::Record(fields) => {
-                let parts: Vec<String> = fields.iter()
-                    .map(|(name, ty)| format!("{}:{}", name, ty))
-                    .collect();
-                write!(f, "Record<{}>", parts.join(", "))
-            }
         }
     }
 }
@@ -61,12 +54,14 @@ pub enum Expr {
     Boolean(bool),
     String(String),
     Nil,
-    TableCtor(Vec<Expr>),
-    /// Parked by the constructor cut: nothing constructs records since
-    /// the `{k: v}` syntax was rejected at parse — the analyzer through
-    /// backend arms stay wired for the Lua-style constructor redesign.
-    #[allow(dead_code)]
-    RecordCtor(Vec<(String, Expr)>),
+    /// Lua-style table constructor. Each entry is a resolved
+    /// `(slot, value)` pair: positional entries take slots 0..n-1 in
+    /// source order (glm's 0-indexed dialect), `{[k] = v}` entries take
+    /// their constant integer slot. The parser rejects duplicate slots
+    /// (no last-wins) and every non-constant or named key, so the slots
+    /// here are unique and the emission order is the source order.
+    /// Empty (`{}`) stays the Pending first-touch root.
+    TableCtor(Vec<(i64, Expr)>),
     Identifier(String),
     Index {
         obj: Box<Expr>,

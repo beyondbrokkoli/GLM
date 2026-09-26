@@ -8,7 +8,7 @@ use super::core::{LayoutVerdict, TableShape, BOUNDS_FAIL_THRESHOLD, NULL_ROOT, S
 use super::facts::ShapeFacts;
 use super::helpers::{extract_guard, merge_table_scopes};
 use super::ty::{arith_ty, join_ty, scalar, Ty};
-use Ty::{Bool, Conflict, Flt, Int, Pending, Record, Str, Tbl};
+use Ty::{Bool, Conflict, Flt, Int, Pending, Str, Tbl};
 
 /// A localized shape-analysis failure. It bubbles to the nearest
 /// `walk_stmts`, which records it in the diagnostics ledger, skips the
@@ -189,15 +189,6 @@ impl Analyzer {
             return self.report_conflict(id);
         }
 
-        if let Record(fields) = self.site_elem[id].clone() {
-            signal!(self.recording, trace::TRACE_RECORD_PRESERVED);
-            let mapped = fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), self.ty_to_static(ty, id)))
-                .collect();
-            return crate::ast::StaticType::Record(mapped);
-        }
-
         if let Some(children) = self.child_sites.get(&id).cloned() {
             signal!(self.recording, trace::TRACE_CHILD_FAST_PATH);
             let mut uniform_type: Option<crate::ast::StaticType> = None;
@@ -236,14 +227,6 @@ impl Analyzer {
             Tbl(inner) => {
                 signal!(self.recording, trace::TRACE_ELEM_FALLBACK_TBL);
                 crate::ast::StaticType::Table(Box::new(self.ty_to_static(&inner, id)))
-            },
-            Record(fields) => {
-                signal!(self.recording, trace::TRACE_ELEM_FALLBACK_REC);
-                let mapped = fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), self.ty_to_static(ty, id)))
-                    .collect();
-                crate::ast::StaticType::Record(mapped)
             },
             Int | Pending => {
                 signal!(self.recording, trace::TRACE_ELEM_FALLBACK_INT);
@@ -294,14 +277,6 @@ impl Analyzer {
                 signal!(self.recording, trace::TRACE_TY_STATIC_TBL);
                 crate::ast::StaticType::Table(Box::new(self.ty_to_static(inner, site)))
             },
-            Record(fields) => {
-                signal!(self.recording, trace::TRACE_TY_STATIC_REC);
-                let mapped = fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), self.ty_to_static(ty, site)))
-                    .collect();
-                crate::ast::StaticType::Record(mapped)
-            },
             Conflict => {
                 signal!(self.recording, trace::TRACE_TY_STATIC_CONFLICT);
                 self.report_conflict(site)
@@ -343,7 +318,7 @@ impl Analyzer {
                         let bind = self.infer_bind(expr)?;
                         if scalar(&bind.ty) {
                             signal!(self.recording, trace::TRACE_BIND_SCALAR);
-                        } else if matches!(expr, Expr::TableCtor(_) | Expr::RecordCtor(_)) {
+                        } else if matches!(expr, Expr::TableCtor(_)) {
                             signal!(self.recording, trace::TRACE_BIND_HEAP);
                         }
                         sets.push(bind);
@@ -381,7 +356,7 @@ impl Analyzer {
                 let bind = self.infer_bind(expr)?;
                 if scalar(&bind.ty) {
                     signal!(self.recording, trace::TRACE_BIND_SCALAR);
-                } else if matches!(expr, Expr::TableCtor(_) | Expr::RecordCtor(_)) {
+                } else if matches!(expr, Expr::TableCtor(_)) {
                     signal!(self.recording, trace::TRACE_BIND_HEAP);
                 }
 
@@ -428,16 +403,11 @@ impl Analyzer {
 
                 let (vt, _) = self.infer_expr(value)?;
 
-                // Store-value discrimination for the ownership map: a
-                // record stored into a table is the BS-11 enabler (no
-                // ownership edge, never frees); a table stored into a
-                // table rides the deep-free flag edge.
-                if self.recording {
-                    if matches!(vt, Record(_)) {
-                        signal!(self.recording, trace::TRACE_STMT_IDX_REC_VALUE);
-                    } else if matches!(vt, Tbl(_)) {
-                        signal!(self.recording, trace::TRACE_STMT_IDX_TBL_VALUE);
-                    }
+                // Store-value census for the ownership map: a table
+                // stored into a table rides the deep-free flag edge
+                // when inline; a named child owns itself.
+                if self.recording && matches!(vt, Tbl(_)) {
+                    signal!(self.recording, trace::TRACE_STMT_IDX_TBL_VALUE);
                 }
 
                 let mut base_obj = obj;
@@ -679,10 +649,10 @@ impl Analyzer {
                 signal!(self.recording, trace::TRACE_INFER_NIL);
                 Ok((Conflict, BTreeSet::new()))
             },
-            Expr::TableCtor(elems) => {
+            Expr::TableCtor(entries) => {
                 let id = self.sites[&(expr as *const Expr)];
                 let mut first_elem_ty: Option<Ty> = None;
-                for e in elems {
+                for (_, e) in entries {
                     let (t, _) = self.infer_expr(e)?;
                     if matches!(t, Tbl(_))
                         && let Some(&child_site) = self.sites.get(&(e as *const Expr))
@@ -718,27 +688,6 @@ impl Analyzer {
                 };
                 Ok((Tbl(Box::new(resolved)), BTreeSet::from([id])))
             }
-            Expr::RecordCtor(fields) => {
-                let id = self.sites[&(expr as *const Expr)];
-                signal!(self.recording, trace::TRACE_REC_CTOR);
-                let mut record_ty: Vec<(String, Ty)> = Vec::with_capacity(fields.len());
-                for (name, val_expr) in fields {
-                    signal!(self.recording, trace::TRACE_REC_FIELD);
-                    let (t, _) = self.infer_expr(val_expr)?;
-                    if matches!(t, Record(_)) {
-                        signal!(self.recording, trace::TRACE_REC_NESTED);
-                    }
-                    if matches!(t, Tbl(_))
-                        && let Some(&child_site) = self.sites.get(&(val_expr as *const Expr))
-                    {
-                        signal!(self.recording, trace::TRACE_INFER_REC_CHILD);
-                        self.child_sites.entry(id).or_default().insert(child_site);
-                    }
-                    record_ty.push((name.clone(), t));
-                }
-                self.site_elem[id] = Record(record_ty.clone());
-                Ok((Record(record_ty), BTreeSet::from([id])))
-            }
             Expr::Index { obj, key } => {
                 let (kt, _) = self.infer_expr(key)?;
                 if matches!(kt, Flt | Bool | Str) {
@@ -747,7 +696,7 @@ impl Analyzer {
                     return Ok((Conflict, BTreeSet::new()));
                 }
                 let (t, sites) = self.infer_expr(obj)?;
-                if !matches!(t, Tbl(_) | Record(_)) {
+                if !matches!(t, Tbl(_)) {
                     signal!(self.recording, trace::TRACE_INFER_IDX_BAD_OBJ);
                     return Ok((Conflict, BTreeSet::new()));
                 }
@@ -945,15 +894,9 @@ impl Analyzer {
 
     fn check_uses(&mut self, expr: &Expr) -> Result<(), ShapeError> {
         match expr {
-            Expr::TableCtor(elems) => {
+            Expr::TableCtor(entries) => {
                 signal!(self.recording, trace::TRACE_CHK_USE_TBL);
-                for e in elems {
-                    self.check_uses(e)?;
-                }
-            }
-            Expr::RecordCtor(fields) => {
-                signal!(self.recording, trace::TRACE_CHK_USE_REC);
-                for (_, val) in fields {
+                for (_, val) in entries {
                     self.check_uses(val)?;
                 }
             }

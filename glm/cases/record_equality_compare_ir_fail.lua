@@ -1,10 +1,10 @@
--- glm/cases/record_equality_compare_ir_fail.lua
--- (former panic) record == record passed the checker and died at clang comparing ptr registers as i64 (C.4).
+-- record_equality_compare_ir_fail.lua: former record == record clang-fail pin
 --
--- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
--- at parse until the Lua-style constructor redesign lands. The case
--- stays as a guard — the comparison face returns with the redesign; the ctor rejection fires first today.
--- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
+-- RECORD SYNTAX GUARD: the {k: v} spelling was removed with the record
+-- machinery (named-key constructors and mixed-type layouts are
+-- not glm's model). The parse must reject it here —
+-- re-acceptance of the colon form is the regression this pin catches.
+-- EXPECT_BUILD_FAIL: Syntax Error: record syntax
 local a = { x: 1, name: "a" }
 local b = { x: 1, name: "b" }
 print(a == b)

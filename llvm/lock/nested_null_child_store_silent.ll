@@ -19,8 +19,7 @@ b0:
   %v0 = call ptr @glm_tbl_new(i64 8, i8 0)
   %v3 = add i64 0, 0
   call void @glm_tbl_get(ptr %v0, i64 %v3, ptr %ts0.dst)
-  %ts0.loaded = load i64, ptr %ts0.dst
-%v1 = inttoptr i64 %ts0.loaded to ptr
+  %v1 = load ptr, ptr %ts0.dst
   %v4 = add i64 0, 0
   %v5 = add i64 0, 5
   store i64 %v5, ptr %ts1.valp

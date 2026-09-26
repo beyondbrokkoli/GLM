@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct LowerError(pub String);
 
 /// The type a join phi carries when its arms disagree. A heap type
-/// (Table/Record) beats the bare-local Integer placeholder: the phi
-/// holds the header or null on the arms, and ptr storage covers both —
-/// an Integer-typed phi over ptr inputs is invalid IR (clang rejects
+/// (Table) beats the bare-local Integer placeholder: the phi holds the
+/// header or null on the arms, and ptr storage covers both — an
+/// Integer-typed phi over ptr inputs is invalid IR (clang rejects
 /// "'%v' defined with type 'ptr' but expected 'i64'"). Checker
 /// unification rejects every other disagreement before lowering, so
 /// the final fallback is unreachable in practice.
@@ -22,7 +22,7 @@ fn join_phi_ty(a: &StaticType, b: &StaticType) -> StaticType {
     if a == b {
         return a.clone();
     }
-    let heap = |t: &StaticType| matches!(t, StaticType::Table(_) | StaticType::Record(_));
+    let heap = |t: &StaticType| matches!(t, StaticType::Table(_));
     // Heap wins over the bare-local placeholder; any other disagreement
     // the checker already rejected, so the backedge type is the answer.
     if heap(a) { a.clone() } else { b.clone() }
@@ -766,93 +766,23 @@ impl<'a> IrLowerer<'a> {
                 self.emit(Instruction::SysAllocCount { target });
                 Ok((target, StaticType::Integer))
             }
-            Expr::RecordCtor(fields) => {
-                // Records compile to the same LLVM table representation as arrays.
-                // The distinction is purely at the shape/typing level.
-                let record_ty = self.shape.elem_of(expr);
-
-                // [Deep-Free Ownership: Strike 4] Only *inline* constructors
-                // (TableCtor or RecordCtor literals) are owned by this record;
-                // fields holding named identifiers manage their own lifetime
-                // via block-scoping, and flagging them would double-free.
-                // Strings are interned .rodata globals, never heap-owned, so
-                // they must never contribute the deep-free flag.
-                let mut has_inline_children = false;
-                for (_, val) in fields {
-                    if matches!(val, Expr::TableCtor(_) | Expr::RecordCtor(_)) {
-                        has_inline_children = true;
-                    }
-                }
-
-                // Check if element type is a table or a nested record for the
-                // contains_tables flag (both are heap GlmTables to deep-free).
-                let is_table_elem = match &record_ty {
-                    StaticType::Record(rec_fields) => {
-                        rec_fields.iter().any(|(_, ty)| {
-                            matches!(ty, StaticType::Table(_) | StaticType::Record(_))
-                        })
-                    }
-                    _ => false,
-                };
-                let contains_tables = is_table_elem && has_inline_children;
-
-                let mut elem_regs = Vec::with_capacity(fields.len());
-                for (_, val) in fields {
-                    let (r, _) = self.lower_expr(val, None)?;
-                    elem_regs.push(r);
-                }
-
-                // Force all records to i64 slots: all GLM types fit in 8 bytes,
-                // so we use integer buffers and LLVM bitcasting for mixed types.
-                let elem_for_header = StaticType::Table(Box::new(StaticType::Integer));
-
-                let mode_bit = match self.lookup_layout_for(expr)? {
-                    crate::shape::LayoutVerdict::Sparse => 0x01,
-                    _ => 0x00,
-                };
-                let flags = mode_bit | if contains_tables { 0x80 } else { 0x00 };
-
-                self.emit(Instruction::TableNew {
-                    target: reg,
-                    elem: elem_for_header,
-                    flags,
-                    is_record: true,
-                });
-                // Birth register of this record site — the do-exit free
-                // path frees through it when the ctor dominates the exit.
-                if let Some(&site) = self.shape.sites.get(&(expr as *const Expr)) {
-                    self.site_regs.insert(site, (reg, self.ctrl_depth));
-                }
-                for (i, v_reg) in elem_regs.into_iter().enumerate() {
-                    let i_reg = self.next_reg();
-                    self.emit(Instruction::LoadInt {
-                        target: i_reg,
-                        val: i as i64,
-                    });
-                    self.emit(Instruction::TableSet {
-                        table: reg,
-                        index: i_reg,
-                        value: v_reg,
-                    });
-                }
-                // Return the record type for scope tracking
-                Ok((reg, record_ty))
-            }
-            Expr::TableCtor(elems) => {
+            Expr::TableCtor(entries) => {
                 let elem = self.shape.elem_of(expr);
 
                 // [Variable Capture: Deep-Free Ownership]
-                // Track whether any element is an *inline anonymous constructor*.
-                // If a table captures named identifiers (e.g. `local inner = {};
-                // local outer = {inner}`), `lower_expr` resolves the identifier to
-                // its existing SSA register — that variable manages its own lifetime
-                // via block-scoping. Setting contains_tables (bit 0x80) on the outer
-                // table would cause `glm_tbl_free` to deep-free the child, which
-                // conflicts with the child's natural block-scope cleanup → double-
-                // free.  Only *inline* constructors (`{{1,2}}`) require the parent
-                // to own the child's deep-free.
+                // Track whether any entry value is an *inline anonymous
+                // constructor*. If a table captures named identifiers (e.g.
+                // `local inner = {}; local outer = {[0] = inner}`),
+                // `lower_expr` resolves the identifier to its existing SSA
+                // register — that variable manages its own lifetime via
+                // block-scoping. Setting contains_tables (bit 0x80) on the
+                // outer table would cause `glm_tbl_free` to deep-free the
+                // child, which conflicts with the child's natural block-scope
+                // cleanup → double-free. Only *inline* constructors
+                // (`{[0] = {1, 2}}`) require the parent to own the child's
+                // deep-free.
                 let mut has_inline_tables = false;
-                for e in elems {
+                for (_, e) in entries {
                     if matches!(e, Expr::TableCtor(_)) {
                         has_inline_tables = true;
                     }
@@ -862,8 +792,8 @@ impl<'a> IrLowerer<'a> {
                 let contains_tables = matches!(elem, crate::ast::StaticType::Table(_))
                     && has_inline_tables;
 
-                let mut elem_regs = Vec::with_capacity(elems.len());
-                for e in elems {
+                let mut elem_regs = Vec::with_capacity(entries.len());
+                for (_, e) in entries {
                     // If `e` is an Identifier, `lower_expr` natively fetches its
                     // existing SSA register — no re-allocation, no ownership leak.
                     let (r, _) = self.lower_expr(e, None)?;
@@ -884,18 +814,22 @@ impl<'a> IrLowerer<'a> {
                     elem: elem.clone(),
                     // Packed flags: bit 0 = mode (0=Dense, 1=Sparse), bit 7 = contains_tables.
                     flags,
-                    is_record: false,
                 });
                 // Birth register of this table site — the do-exit free
                 // path frees through it when the ctor dominates the exit.
                 if let Some(&site) = self.shape.sites.get(&(expr as *const Expr)) {
                     self.site_regs.insert(site, (reg, self.ctrl_depth));
                 }
-                for (i, v_reg) in elem_regs.into_iter().enumerate() {
+                // The constructor "desugars" here, at the IR level: one
+                // TableSet per entry, slots as resolved at parse. This is
+                // the same instruction sequence a store-built table
+                // produces, so populated and store-built tables share one
+                // code path downstream.
+                for ((slot, _), v_reg) in entries.iter().zip(elem_regs) {
                     let i_reg = self.next_reg();
                     self.emit(Instruction::LoadInt {
                         target: i_reg,
-                        val: i as i64,
+                        val: *slot,
                     });
                     self.emit(Instruction::TableSet {
                         table: reg,
@@ -908,22 +842,9 @@ impl<'a> IrLowerer<'a> {
             Expr::Index { obj, key } => {
                 let (t_reg, t_ty) = self.lower_expr(obj, None)?;
                 let (i_reg, _) = self.lower_expr(key, None)?;
-                // Check if key is a constant integer literal for field index lookup.
-                let field_index = if let Expr::Integer(n) = key.as_ref() {
-                    Some(*n)
-                } else {
-                    None
-                };
-                // Determine the actual field type for the target register.
+                // Determine the actual element type for the target register.
                 let target_ty = match t_ty {
                     StaticType::Table(elem) => (*elem).clone(),
-                    StaticType::Record(fields) => {
-                        if let Some(n) = field_index {
-                            fields.get(n as usize).map(|(_, ty)| ty.clone())
-                        } else {
-                            None
-                        }.unwrap_or(StaticType::Integer)
-                    }
                     _ => unreachable!("checker guarantees a table operand"),
                 };
                 self.emit(Instruction::TableGet {

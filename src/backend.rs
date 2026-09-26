@@ -3,7 +3,7 @@ use crate::ast::StaticType;
 use crate::ir::{Instruction, IrProgram, RegId, Terminator};
 use crate::shape::LayoutVerdict;
 use glm_rt::trace;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 fn llvm_type(ty: &StaticType) -> &'static str {
     match ty {
@@ -14,7 +14,6 @@ fn llvm_type(ty: &StaticType) -> &'static str {
         // Unconstrained Unknown types never have typed access, so i8 is a
         // zero-overhead dummy: the data buffer is never read or written.
         StaticType::Unknown(_) => "i8",
-        StaticType::Record(_) => "ptr",
     }
 }
 
@@ -89,8 +88,6 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
         tails
     };
     let mut reg_types: HashMap<RegId, StaticType> = HashMap::new();
-    // Track which registers hold record tables (i64-backed heterogeneous storage).
-    let mut record_regs: HashSet<RegId> = HashSet::new();
 
     let mut allocas = String::new();
     let mut code = String::new();
@@ -153,7 +150,7 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                     StaticType::Boolean => {
                         code.push_str(&format!("  %v{} = or i1 %v{}, 0\n", target, source))
                     }
-                    StaticType::String | StaticType::Table(_) | StaticType::Record(_) => code.push_str(&format!(
+                    StaticType::String | StaticType::Table(_) => code.push_str(&format!(
                         "  %v{} = getelementptr i8, ptr %v{}, i64 0\n",
                         target, source
                     )),
@@ -166,18 +163,13 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                     code.push_str(&format!("  %v{} = inttoptr i64 0 to ptr\n", target));
                 }
                 
-                Instruction::TableNew { target, elem, flags, is_record } => {
+                Instruction::TableNew { target, elem, flags } => {
                     trace::compiler_trace_set(trace::TRACE_OFFLOAD_EMIT);
 
                     needs_tbl_new_decl = true;
                     needs_hdr_md = true;
-                    if *is_record {
-                        record_regs.insert(*target);
-                        reg_types.insert(*target, StaticType::Integer); // records use Integer type
-                    } else {
-                        reg_types.insert(*target, StaticType::Table(Box::new(elem.clone())));
-                    }
-                    
+                    reg_types.insert(*target, StaticType::Table(Box::new(elem.clone())));
+
                     // flags: bit 0 = mode (0=Dense, 1=Sparse), bit 7 = contains_tables
                     code.push_str(&format!(
                         "  %v{} = call ptr @glm_tbl_new(i64 {}, i8 {})\n",
@@ -187,18 +179,11 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                     ));
                 }
                 Instruction::TableGet { target, table, index, target_ty } => {
-                    // Records store Integer (i64), so check record_regs instead of pattern matching Record
-                    let is_record_load = record_regs.contains(table);
-                    let elem = if is_record_load {
-                        StaticType::Integer
-                    } else {
-                        match reg_types.get(table) {
-                            Some(StaticType::Table(elem)) => (**elem).clone(),
-                            Some(StaticType::Record(_)) => StaticType::Integer,
-                            _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
-                        }
+                    let elem = match reg_types.get(table) {
+                        Some(StaticType::Table(elem)) => (**elem).clone(),
+                        _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
                     };
-                    // Store the field type in reg_types so Print dispatches correctly.
+                    // Store the element type in reg_types so Print dispatches correctly.
                     reg_types.insert(*target, target_ty.clone());
                     needs_tbl_get_decl = true;
                     let ety = storage_type(&elem);
@@ -218,57 +203,14 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                                %v{target} = icmp ne i8 %ts{f}.c, 0\n",
                             f = f, target = target
                         ));
-                    } else if elem == StaticType::Integer && is_record_load {
-                        // For records with i64 slots, cast loaded i64 to the field type.
-                        // Always use target_ty to determine the cast — this covers both
-                        // direct record loads and nested record index operations.
-                        match target_ty {
-                            StaticType::Float => {
-                                code.push_str(&format!(
-                                    "  %ts{f}.loaded = load i64, ptr %ts{f}.dst\n\
-                                       %v{target} = bitcast i64 %ts{f}.loaded to double\n",
-                                    f = f, target = target
-                                ));
-                            }
-                            StaticType::Boolean => {
-                                code.push_str(&format!(
-                                    "  %ts{f}.loaded = load i64, ptr %ts{f}.dst\n\
-                                       %v{target} = trunc i64 %ts{f}.loaded to i1\n",
-                                    f = f, target = target
-                                ));
-                            }
-                            StaticType::String | StaticType::Table(_) | StaticType::Record(_) => {
-                                code.push_str(&format!(
-                                    "  %ts{f}.loaded = load i64, ptr %ts{f}.dst\n\
-                                       %v{target} = inttoptr i64 %ts{f}.loaded to ptr\n",
-                                    f = f, target = target
-                                ));
-                            }
-                            _ => {
-                                code.push_str(&format!(
-                                    "  %v{target} = load {ety}, ptr %ts{f}.dst\n",
-                                    target = target, ety = ety, f = f
-                                ));
-                            }
-                        }
-                    } else if *target_ty != StaticType::Integer && *target_ty != StaticType::Boolean && *target_ty != StaticType::Float {
-                        // Non-record table with non-scalar type: inttoptr cast.
-                        // This handles cases where the backend's reg_types doesn't
-                        // track the exact element type (e.g., regular tables holding records).
-                        code.push_str(&format!(
-                            "  %ts{f}.loaded = load i64, ptr %ts{f}.dst\n\
-                               %v{target} = inttoptr i64 %ts{f}.loaded to ptr\n",
-                            f = f, target = target
-                        ));
                     } else {
+                        // Every element loads in its native width. There is no
+                        // cross-type cast here on purpose: tables are strictly
+                        // monomorphic, so the element type decides the width.
                         code.push_str(&format!(
                             "  %v{target} = load {ety}, ptr %ts{f}.dst\n",
                             target = target, ety = ety, f = f
                         ));
-                    }
-                    // Propagate record flag to target register for nested index ops.
-                    if is_record_load {
-                        record_regs.insert(*target);
                     }
                 }
                 Instruction::TableReserve { table, bound } => {
@@ -280,14 +222,9 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                 }
 
                 Instruction::TableSetFast { table, index, value, layout } => {
-                    let elem = if record_regs.contains(table) {
-                        StaticType::Integer
-                    } else {
-                        match reg_types.get(table) {
-                            Some(StaticType::Table(elem)) => (**elem).clone(),
-                            Some(StaticType::Record(_)) => StaticType::Integer,
-                            _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
-                        }
+                    let elem = match reg_types.get(table) {
+                        Some(StaticType::Table(elem)) => (**elem).clone(),
+                        _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
                     };
                     needs_hdr_md = true;
                     let ety = storage_type(&elem);
@@ -297,49 +234,26 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                     // Pre-generate the counter-embedded cast variable names to avoid
                     // nested format argument issues where {f} would be literal text.
                     let cast_var = format!("%ts{}.c", f);
-                    let cast_var_cv = format!("%ts{}.cv", f);
 
-                    // For records (i64 slots), cast non-integer values before store.
-                    // Record registers masquerade as Integer in reg_types (see
-                    // TableNew), so a record VALUE must be treated as a pointer.
-                    let val_is_record = record_regs.contains(value);
-                    let val_cast = if elem == StaticType::Integer {
-                        if val_is_record {
-                            format!("  {cv} = ptrtoint ptr %v{value} to i64\n  {cvv} = {cv}\n",
-                                cv = cast_var, cvv = cast_var_cv, value = value)
-                        } else {
-                            match reg_types.get(value) {
-                                Some(StaticType::Float) => {
-                                    format!("  {cv} = bitcast double %v{value} to i64\n  {cvv} = {cv}\n",
-                                        cv = cast_var, cvv = cast_var_cv, value = value)
-                                }
-                                Some(StaticType::Boolean) => {
-                                    format!("  {cv} = zext i1 %v{value} to i64\n  {cvv} = {cv}\n",
-                                        cv = cast_var, cvv = cast_var_cv, value = value)
-                                }
-                                Some(StaticType::String | StaticType::Table(_) | StaticType::Record(_)) => {
-                                    format!("  {cv} = ptrtoint ptr %v{value} to i64\n  {cvv} = {cv}\n",
-                                        cv = cast_var, cvv = cast_var_cv, value = value)
-                                }
-                                _ => {
-                                    if !reg_types.contains_key(value) {
-                                        // Untracked value into an i64 slot: the
-                                        // ptrtoint cast was skipped — type confusion.
-                                        trace::compiler_trace_set(trace::TRACE_FAIL_TYPE_CONFUSION);
-                                    }
-                                    String::new()
-                                }
-                            }
-                        }
-                    } else if matches!(elem, StaticType::Boolean) {
+                    // Bool cells are byte-packed: zext the i1 before the store.
+                    // Every other element stores in its native width — the old
+                    // i64-slot cast family (bitcast double, zext i1, ptrtoint ptr)
+                    // existed only to pack mixed types into record slots and is
+                    // gone with records: strict typing rejects any value/element
+                    // disagreement in the checker, so a non-integer register in
+                    // an i64 cell can only mean an invariant breach — the
+                    // confusion signal is the tripwire, never a silent reinterpret.
+                    let val_cast = if matches!(elem, StaticType::Boolean) {
                         format!("  {cv} = zext i1 %v{value} to i8\n", cv = cast_var, value = value)
                     } else {
+                        if elem == StaticType::Integer
+                            && !matches!(reg_types.get(value), Some(StaticType::Integer))
+                        {
+                            trace::compiler_trace_set(trace::TRACE_FAIL_TYPE_CONFUSION);
+                        }
                         String::new()
                     };
-
-                    let val_use = if elem == StaticType::Integer && (val_is_record || reg_types.get(value).map(|t| *t == StaticType::Float || *t == StaticType::Boolean || matches!(t, StaticType::String | StaticType::Table(_) | StaticType::Record(_))).unwrap_or(false)) {
-                        cast_var_cv
-                    } else if matches!(elem, StaticType::Boolean) {
+                    let val_use = if matches!(elem, StaticType::Boolean) {
                         cast_var
                     } else {
                         format!("%v{value}")
@@ -394,14 +308,9 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                     }
                 }
                 Instruction::TableSet { table, index, value } => {
-                    let elem = if record_regs.contains(table) {
-                        StaticType::Integer
-                    } else {
-                        match reg_types.get(table) {
-                            Some(StaticType::Table(elem)) => (**elem).clone(),
-                            Some(StaticType::Record(_)) => StaticType::Integer,
-                            _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
-                        }
+                    let elem = match reg_types.get(table) {
+                        Some(StaticType::Table(elem)) => (**elem).clone(),
+                        _ => return Err(vec!["Internal Compiler Error: backend tracks every table reg's type".to_string()]),
                     };
                     needs_tbl_set_decl = true;
                     let ety = storage_type(&elem);
@@ -411,63 +320,24 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                     allocas.push_str(&format!("  %ts{f}.valp = alloca {ety}\n", f = f, ety = ety));
 
                     if matches!(elem, StaticType::Boolean) {
+                        // Byte-packed bool cells: zext the i1 value to i8.
                         code.push_str(&format!(
                             "  %ts{f}.z = zext i1 %v{value} to i8\n\
                                store i8 %ts{f}.z, ptr %ts{f}.valp\n",
                             f = f, value = value
                         ));
-                    } else if elem == StaticType::Integer {
-                        // For records with integer slot, cast non-integer values to i64 before store.
-                        // Determine the source register's actual type. Record registers are
-                        // typed Integer in reg_types (see TableNew), so consult record_regs
-                        // first: a record VALUE is a heap pointer and must be ptrtoint'ed
-                        // into the i64 slot, or the IR stores a raw ptr where i64 is expected.
-                        let val_ty = if record_regs.contains(value) {
-                            StaticType::Record(Vec::new())
-                        } else {
-                            match reg_types.get(value) {
-                                Some(ty) => ty.clone(),
-                                None => {
-                                    // Untracked value into an i64 slot: the
-                                    // ptrtoint cast was skipped — type confusion.
-                                    trace::compiler_trace_set(trace::TRACE_FAIL_TYPE_CONFUSION);
-                                    StaticType::Integer
-                                }
-                            }
-                        };
-                        match &val_ty {
-                            StaticType::Float => {
-                                // bitcast double to i64 for storage
-                                code.push_str(&format!(
-                                    "  %ts{f}.cast = bitcast double %v{value} to i64\n\
-                                       store i64 %ts{f}.cast, ptr %ts{f}.valp\n",
-                                    f = f, value = value
-                                ));
-                            }
-                            StaticType::Boolean => {
-                                // zext i1 to i64 for storage
-                                code.push_str(&format!(
-                                    "  %ts{f}.cast = zext i1 %v{value} to i64\n\
-                                       store i64 %ts{f}.cast, ptr %ts{f}.valp\n",
-                                    f = f, value = value
-                                ));
-                            }
-                            StaticType::String | StaticType::Table(_) | StaticType::Record(_) => {
-                                // ptrtoint ptr to i64 for storage
-                                code.push_str(&format!(
-                                    "  %ts{f}.cast = ptrtoint ptr %v{value} to i64\n\
-                                       store i64 %ts{f}.cast, ptr %ts{f}.valp\n",
-                                    f = f, value = value
-                                ));
-                            }
-                            _ => {
-                                code.push_str(&format!(
-                                    "  store {ety} %v{value}, ptr %ts{f}.valp\n",
-                                    ety = ety, value = value, f = f
-                                ));
-                            }
-                        }
                     } else {
+                        // Native-width store, no casts: the record-era family
+                        // that packed double/ptr/i1 values into i64 slots is
+                        // gone — strict typing keeps every register's width
+                        // equal to its cell width, and this branch pokes the
+                        // confusion signal rather than reinterpreting bits if
+                        // that invariant is ever breached.
+                        if elem == StaticType::Integer
+                            && !matches!(reg_types.get(value), Some(StaticType::Integer))
+                        {
+                            trace::compiler_trace_set(trace::TRACE_FAIL_TYPE_CONFUSION);
+                        }
                         code.push_str(&format!(
                             "  store {ety} %v{value}, ptr %ts{f}.valp\n",
                             ety = ety, value = value, f = f
@@ -549,7 +419,6 @@ pub fn generate_llvm_ir(program: &IrProgram) -> Result<String, Vec<String>> {
                             StaticType::Table(_) => return Err(vec!["Type Error: tables cannot be printed".to_string()]),
                             // Unconstrained Unknown types: print 0 as a 1-byte dummy.
                             StaticType::Unknown(_) => code.push_str("  call void @glm_print_int(i64 0)\n"),
-                            StaticType::Record(_) => return Err(vec!["Type Error: records compile as tables, cannot be printed directly".to_string()]),
                         }
                     }
                     code.push_str("  call void @glm_print_nl()\n");
