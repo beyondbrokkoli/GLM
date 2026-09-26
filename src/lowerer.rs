@@ -441,37 +441,32 @@ impl<'a> IrLowerer<'a> {
                 self.current_block = exit_block;
             }
             Stmt::Do { body } => {
-                let outer_keys: BTreeSet<String> =
-                    self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
-
                 self.scopes.push(BTreeMap::new());
 
                 for s in body {
                     self.lower_stmt(s)?;
                 }
 
-                if let Some(block_local) = self.scopes.last_mut() {
-                    let locals: Vec<(String, RegId)> = block_local
+                // [Ownership at scope exit] The analyzer owns the proof
+                // (shape::decide_do_exit): one name per heap site proved
+                // solely owned by this block. Emission stays here —
+                // per-site, not per-name, so intra-block aliasing
+                // cannot double-free and surviving-owned sites are
+                // rejected upstream instead of freed early.
+                let free_names = self.shape.do_exit_frees.get(&(stmt as *const Stmt));
+                let mut regs: Vec<RegId> = match free_names {
+                    Some(names) => names
                         .iter()
-                        .filter(|(_, local)| {
-                            // [Lifecycle Parity Strike] Records are heap
-                            // GlmTables too — block-exit frees them exactly
-                            // like tables (deep-free ownership is decided
-                            // separately by the contains_tables flag).
-                            matches!(local.ty, StaticType::Table(_) | StaticType::Record(_))
-                        })
-                        .filter(|(name, _)| !outer_keys.contains(*name))
-                        .map(|(name, local)| (name.clone(), local.reg))
-                        .collect();
-                    // [Determinism Fix] HashMap iteration order is
-                    // per-process random; sort by register id so the
-                    // block-exit frees emit in reverse construction
-                    // order (LIFO) and codegen stays byte-identical.
-                    let mut locals = locals;
-                    locals.sort_by_key(|(_, reg)| *reg);
-                    for (_, reg) in locals.into_iter().rev() {
-                        self.emit(Instruction::TableFree { table: reg });
-                    }
+                        .map(|name| Ok(self.read_var(name)?.reg))
+                        .collect::<Result<Vec<_>, LowerError>>()?,
+                    None => Vec::new(),
+                };
+                // [Determinism Fix] sort by register id so the
+                // block-exit frees emit in reverse construction
+                // order (LIFO) and codegen stays byte-identical.
+                regs.sort_unstable_by_key(|reg| *reg);
+                for reg in regs.into_iter().rev() {
+                    self.emit(Instruction::TableFree { table: reg });
                 }
 
                 self.scopes.pop();

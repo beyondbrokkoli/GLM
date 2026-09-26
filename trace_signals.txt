@@ -25,6 +25,10 @@
 0   COMPILED               compiler  compiled ok
 1   BUILD_FAIL             compiler  build failed (EXPECT_BUILD_FAIL)
 
+2   DO_EXIT_FREE_SITE      analyzer  do-exit free granted: heap site solely owned by the dying scope, freed once
+3   DO_EXIT_FREE_SHARED    analyzer  do-exit free deduplicated: site held by several dying bindings, one TableFree total
+4   DO_EXIT_ALIAS_SURVIVES analyzer  do-exit refused: block-local aliases a heap site owned outside the block (was silent UAF, now a loud rejection)
+
 10  BIND_SCALAR            analyzer  scalar binding
 11  BIND_HEAP              analyzer  heap binding
 

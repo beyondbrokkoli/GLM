@@ -25,7 +25,6 @@ b0:
   call void @glm_print_int(i64 %v6)
   call void @glm_print_nl()
   call void @glm_tbl_free(ptr %v4)
-  call void @glm_tbl_free(ptr %v0)
   %v8 = call i64 @sys_alloc_count()
   call void @glm_print_int(i64 %v8)
   call void @glm_print_nl()

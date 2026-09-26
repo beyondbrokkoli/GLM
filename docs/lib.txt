@@ -1,1 +1,0 @@
-Crate root of the `glm_rt` staticlib: publishes the C-ABI runtime (`pub mod rt`).

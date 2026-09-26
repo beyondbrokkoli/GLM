@@ -1,16 +1,18 @@
 -- EXPECT: 1
--- EXPECT_PANIC: glm: table allocation of 18446744073709551615 bytes failed
--- BASELINE: wrong-but-current — RUNTIME ABORT (exit 134), not 1.
--- Intra-block aliasing double-free at do-exit: `local b = c` binds b
--- to the SAME register (pointer) as c; scope exit emits TableFree for
--- every block-local of owned heap type, so the one table is freed
--- twice. The second glm_tbl_free re-boxes freed memory, the garbage
--- header's len overflows elem_layout, and the allocator aborts
--- ("table allocation of 18446744073709551615 bytes failed"). No bare
--- locals involved — pre-existing since the do-exit free; found while
--- probing bare-local spelling. The drop_reference sole-ownership proof
--- (A.1) exists for explicit t = nil but scope-exit emission has no
--- alias awareness. Pinning as the map entry for the ownership gap.
+-- EXPECT: 0
+-- FIXED by the do-exit ownership refactor (was a RUNTIME ABORT, exit
+-- 134): `local b = c` binds b to the same register as c, and scope
+-- exit used to emit TableFree for every block-local of owned heap
+-- type — the one table freed twice, the second glm_tbl_free re-boxing
+-- freed memory until the allocator aborted. The free decision moved
+-- into shape analysis (decide_do_exit): a heap site frees at do-exit
+-- iff no binding that survives the block holds it, ONE TableFree per
+-- site regardless of how many dying names alias it. Here c and b both
+-- die with the block, so the site frees exactly once — DO_EXIT_FREE_
+-- SITE + DO_EXIT_FREE_SHARED on the plate. The surviving-alias shape
+-- (block-local aliasing an outer table) is now a loud compile-time
+-- rejection instead of the old silent early free (see
+-- do_exit_alias_survives_rejected).
 do
   local c = {}
   c[0] = 1

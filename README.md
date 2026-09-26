@@ -29,15 +29,6 @@ python3 python/fuzz.py run -s 7
 
 # Wall time + peak RSS of a compiled program
 ./measure.sh ./glm_out
-
-# List documented sources
-./query.sh
-
-# One source file's documentation
-./query.sh src/rt.rs
-
-# One documented function
-./query.sh src/rt.rs glm_tbl_new
 ```
 ```lua
 print("=== GLM Lua Dialect ===")
@@ -87,9 +78,10 @@ do
     local scoped_data = {777, 888}
     print("Scoped data is valid here:")
     print(scoped_data[0])
-    -- The lowerer tracks outer keys. At this lexical boundary, it intercepts
-    -- `scoped_data` and implicitly emits `Instruction::TableFree`.
-    -- The memory is composted instantly. No Garbage Collector involved.
+    -- Shape analysis proves the site is solely owned by this block
+    -- (decide_do_exit); at the lexical boundary the lowerer emits one
+    -- Instruction::TableFree per site. The memory is composted
+    -- instantly. No Garbage Collector involved.
 end
 
 -- In standard Lua, `nil` is a data type.

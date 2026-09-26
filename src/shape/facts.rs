@@ -9,6 +9,12 @@ pub struct ShapeFacts {
     #[allow(dead_code)]
     pub layouts: Vec<LayoutVerdict>,
     pub free_sites: BTreeSet<*const Stmt>,
+    /// Do-exit ownership decisions, keyed by the `Stmt::Do` node: for
+    /// each heap site proved solely owned by the dying block, ONE name
+    /// (deterministic BTreeMap order) whose register holds it. The
+    /// lowerer frees these and only these at block exit — the analyzer
+    /// owns the proof, the lowerer owns the emission.
+    pub do_exit_frees: BTreeMap<*const Stmt, Vec<String>>,
     pub name_dense: BTreeMap<(String, usize), bool>,
     pub substitutions: BTreeMap<usize, StaticType>,
     /// Localized shape errors from the ghost run: the walk completed and

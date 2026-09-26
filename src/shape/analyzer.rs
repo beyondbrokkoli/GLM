@@ -45,6 +45,9 @@ struct Analyzer {
     /// per slot right before the recording walk starts — the map shows
     /// "convergence moved types here" without inflating per-run counts.
     conv_fires: BTreeSet<u8>,
+    /// Do-exit ownership decisions per `Stmt::Do` node (consumed by the
+    /// lowerer; see ShapeFacts::do_exit_frees).
+    do_exit_frees: BTreeMap<*const Stmt, Vec<String>>,
 }
 
 pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
@@ -66,6 +69,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         diagnostics: Vec::new(),
         conflict_reported: BTreeSet::new(),
         conv_fires: BTreeSet::new(),
+        do_exit_frees: BTreeMap::new(),
     };
 
     let mut prev_end: Vec<BTreeMap<String, TableShape>> = Vec::new();
@@ -128,6 +132,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         elems,
         layouts: a.verdicts,
         free_sites: a.free_sites,
+        do_exit_frees: a.do_exit_frees,
         name_dense: a.name_dense,
         substitutions: BTreeMap::new(),
         diagnostics: a.diagnostics,
@@ -510,7 +515,16 @@ impl Analyzer {
                 signal!(self.recording, trace::TRACE_STMT_DO);
                 self.enter_scope((stmt as *const Stmt, 0));
                 self.walk_stmts(body);
+                // Ownership proof while the dying scope is still on the
+                // stack: the pokes land in the block's own scope id. The
+                // refusal is RETURNED, not `?`-propagated, until the
+                // scope bracket closes — an early `?` here would skip
+                // exit_scope, leave the shape stack and the trace
+                // register unbalanced, and make every enclosing do-exit
+                // decision read a stale scope as its own.
+                let verdict = self.decide_do_exit(stmt);
                 self.exit_scope();
+                verdict?
             }
 
             Stmt::Print { exprs } => {
@@ -787,6 +801,64 @@ impl Analyzer {
                 Ok((Int, BTreeSet::new()))
             },
         }
+    }
+
+    /// The do-exit ownership proof — the scope-exit face of the same
+    /// analysis `drop_reference` runs for explicit `t = nil`. A heap
+    /// site may be freed at block exit iff it appears in no binding
+    /// that survives the block; every dying binding that holds it
+    /// shares ONE TableFree (the lowerer frees per site, not per
+    /// name). A site held by a surviving binding used to be freed
+    /// through the block-local anyway — an early free leaving the
+    /// surviving name dangling (silent UAF); it is now a loud,
+    /// localized compile-time rejection. Runs only on the recording
+    /// walk: the fixpoint's scope state is intermediate and its
+    /// probes never see errors (same gate as check_table_use).
+    fn decide_do_exit(&mut self, stmt: &Stmt) -> Result<(), ShapeError> {
+        if !self.recording {
+            return Ok(());
+        }
+
+        let dying = self.scopes.last().expect("do scope always open").clone();
+        let surviving: BTreeSet<usize> = self.scopes[..self.scopes.len() - 1]
+            .iter()
+            .flat_map(|scope| scope.values())
+            .flat_map(|shape| shape.aliases.iter().copied())
+            .filter(|site| *site != NULL_ROOT)
+            .collect();
+
+        let mut seen_sites: BTreeSet<usize> = BTreeSet::new();
+        let mut free_names: Vec<String> = Vec::new();
+        for (name, shape) in &dying {
+            let roots: Vec<usize> = shape
+                .aliases
+                .iter()
+                .copied()
+                .filter(|site| *site != NULL_ROOT)
+                .collect();
+            if roots.is_empty() {
+                // Scalar, bare local, or explicitly nil-dropped — the
+                // nil-drop already freed at its own statement.
+                continue;
+            }
+            for site in roots {
+                if surviving.contains(&site) {
+                    signal!(self.recording, trace::TRACE_DO_EXIT_ALIAS_SURVIVES);
+                    return Err(ShapeError(format!(
+                        "Lifetime Error: block-local '{name}' aliases a table that outlives \
+                         the block — block-exit frees are rejected at compile time"
+                    )));
+                }
+                if !seen_sites.insert(site) {
+                    signal!(self.recording, trace::TRACE_DO_EXIT_FREE_SHARED);
+                } else {
+                    signal!(self.recording, trace::TRACE_DO_EXIT_FREE_SITE);
+                    free_names.push(name.clone());
+                }
+            }
+        }
+        self.do_exit_frees.insert(stmt as *const Stmt, free_names);
+        Ok(())
     }
 
     fn drop_reference(&mut self, name: &str, stmt: &Stmt) -> Result<(), ShapeError> {

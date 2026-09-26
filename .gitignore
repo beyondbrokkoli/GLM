@@ -13,6 +13,5 @@ glm_runtime_fuzz
 .glm_rt_trace.bin
 /docs/skills
 /minimal.lua
-docs/records_and_memory.md
-docs/signal_map.md
-docs/trace-plate.md
+records_and_memory.md
+HANDOFF.md
