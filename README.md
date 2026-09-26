@@ -31,13 +31,13 @@ python3 python/fuzz.py run -s 7
 ./measure.sh ./glm_out
 
 # List documented sources
-docs/query.sh
+./query.sh
 
 # One source file's documentation
-docs/query.sh src/rt.rs
+./query.sh src/rt.rs
 
 # One documented function
-docs/query.sh src/rt.rs glm_tbl_new
+./query.sh src/rt.rs glm_tbl_new
 ```
 ```lua
 print("=== GLM Lua Dialect ===")

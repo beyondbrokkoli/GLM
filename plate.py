@@ -43,6 +43,11 @@ Usage:
   python3 plate.py                              single decode, default paths
   python3 plate.py plate.bin                    single decode
   python3 plate.py plate.bin signals.txt        single decode, explicit SSOT
+  python3 plate.py --fired [plate.bin]          compact: one line of
+                                                `slot:NAME(count)` tokens for
+                                                everything that fired this
+                                                run — built for eyeballs and
+                                                grep, no awk gymnastics
   python3 plate.py good.bin bad.bin             DIFF — first file = good
                                                 (baseline), second = bad
                                                 (suspect); deltas read as
@@ -136,8 +141,12 @@ def load_plate(path: Path):
     # The classic plate is FILE_LEN; the chronology extension appends a
     # header + ring after it, so anything >= FILE_LEN is a valid plate.
     if len(raw) < FILE_LEN:
-        note = " — old plate, scope sections empty" if len(raw) < DIR_OFF else ""
-        print(f"CONTRACT NOTE: {path} is {len(raw)} bytes, expected at least {FILE_LEN}{note}", file=sys.stderr)
+        if len(raw) == PLATE_LEN:
+            note = " — runtime sidecar geometry (sticky-only), not a contract breach"
+        else:
+            note = " — old plate, scope sections empty" if len(raw) < DIR_OFF else ""
+        print(f"note: {path} is {len(raw)} bytes, expected at least {FILE_LEN}{note}",
+              file=sys.stderr)
     return raw.ljust(FILE_LEN, b"\0"), len(raw) >= FILE_LEN
 
 
@@ -226,6 +235,41 @@ def print_scope_map(data, violations):
 
 # --- single-plate mode (the original behavior) ------------------------------
 
+def run_fired(plate_path, ssot_path, signals):
+    """Compact mode: everything that fired this run as one line of
+    `slot:NAME(count)` tokens (scope-tagged when scope sections exist),
+    plus sticky-only tokens and the contract verdict. For eyeballs and
+    grep — `plate.py --fired p.bin | tr ' ' '\\n'` when you need one
+    signal per line."""
+    data, full = load_plate(plate_path)
+    low, high = data[:COUNT_BASE], data[COUNT_BASE:PLATE_LEN]
+    fired = [n for n in range(COUNT_BASE) if high[n] > 0]
+    sticky_only = [n for n in range(COUNT_BASE) if low[n] == 1 and high[n] == 0]
+    scopes = live_scopes(data) if full else []
+
+    tokens = []
+    for n in fired:
+        tok = f"{n}:{signal_name(n, signals)}({fmt_count(high[n])})"
+        if scopes:
+            cells = scope_cells(data, n, scopes)
+            tok += "[" + ",".join(f"s{s}x{c}" for s, c in cells) + "]"
+        tokens.append(tok)
+    print(f"{plate_path}: fired this run ({len(fired)})")
+    print("  " + (" ".join(tokens) if tokens else "(nothing)"))
+    if sticky_only:
+        sticky = " ".join(f"{n}:{signal_name(n, signals)}" for n in sticky_only)
+        print(f"sticky only ({len(sticky_only)}): {sticky}")
+    if scopes:
+        tree = ", ".join(
+            f"s{s}(d{scope_entry(data, s)[0]},"
+            f"{'root' if scope_entry(data, s)[1] == PARENT_NONE else 'p' + str(scope_entry(data, s)[1])})"
+            for s in scopes)
+        print(f"scopes ({len(scopes)}): {tree}")
+    violations = plate_violations(data, tree=False)
+    print("contract: " + ("VIOLATIONS — " + "; ".join(violations) if violations
+                          else "clean"))
+
+
 def print_chronology(data, signals):
     if len(data) < CHRONO_HEADER_OFF + 8:
         print("\n== Event Chronology ==")
@@ -267,7 +311,7 @@ def print_chronology(data, signals):
 
 
 def run_single(plate_path, ssot_path, signals):
-    data, _ = load_plate(plate_path)
+    data, full = load_plate(plate_path)
     low, high = data[:COUNT_BASE], data[COUNT_BASE:PLATE_LEN]
 
     fired = [(n, high[n]) for n in range(COUNT_BASE) if high[n] > 0]
@@ -278,7 +322,11 @@ def run_single(plate_path, ssot_path, signals):
 
     print(f"== fired this run ({len(fired)}) — most recent compile ==")
     if not fired:
-        print("  (nothing — compiler never ran or counters were reset)")
+        if not full and any(low):
+            print("  (nothing per-run — short plate: the runtime sidecar writes "
+                  "sticky bits only, so everything lands in 'sticky only' below)")
+        else:
+            print("  (nothing — compiler never ran or counters were reset)")
 
     violations = []
 
@@ -536,6 +584,9 @@ def main():
                          "`plate.bin signals.txt` is the legacy single-plate form")
     ap.add_argument("-s", "--signals", metavar="FILE", type=Path,
                     help="path to trace_signals.txt (default: next to this script)")
+    ap.add_argument("--fired", action="store_true",
+                    help="compact output: one line of `slot:NAME(count)` tokens "
+                         "for everything that fired this run (single-plate mode only)")
     args = ap.parse_args()
 
     paths = args.plates
@@ -563,6 +614,12 @@ def main():
         good_path, bad_path = Path(paths[0]), Path(paths[1])
         signals = load_signals(ssot_path)
         run_diff(good_path, bad_path, ssot_path, signals)
+    elif args.fired and len(paths) > 1:
+        ap.error("--fired decodes one plate at a time")
+    elif args.fired:
+        plate_path = Path(paths[0]) if paths else Path(DEFAULT_PLATE)
+        signals = load_signals(ssot_path)
+        run_fired(plate_path, ssot_path, signals)
     else:
         plate_path = Path(paths[0]) if paths else Path(DEFAULT_PLATE)
         signals = load_signals(ssot_path)

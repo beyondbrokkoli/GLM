@@ -153,6 +153,16 @@ impl<'a> IrLowerer<'a> {
                     let layout = self.lookup_layout_for(expr)?;
                     bindings.push((target_reg, ty, layout));
                 }
+                // `local x` without initializer: declare the name over a
+                // null register — the shape layer models it as a nil-valued
+                // binding and the checker as the bare-local Unknown, so the
+                // zip above must not drop it. The first assignment
+                // overwrites the register exactly like `x = nil` does.
+                while bindings.len() < names.len() {
+                    let null_reg = self.next_reg();
+                    self.emit(Instruction::LoadNull { target: null_reg });
+                    bindings.push((null_reg, StaticType::Integer, LayoutVerdict::default()));
+                }
                 for (name, (reg, ty, layout)) in names.iter().zip(bindings) {
                     self.declare_var(name.clone(), reg, ty, layout);
                 }

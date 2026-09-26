@@ -6,7 +6,8 @@
 -- flag — proving it would require new analysis (an anonymous value
 -- stored into m[0] is only reachable through m, but named records
 -- stored the same way are owned elsewhere). Documented in
--- docs/records-and-memory.md as the remaining ownership-model gap.
+-- docs/records_and_memory.md as BS-11, the remaining ownership-model
+-- gap.
 do
   local m = {}
   m[0] = { x: 1, name: "a" }

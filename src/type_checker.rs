@@ -3,10 +3,17 @@ use crate::shape::ShapeFacts;
 use glm_rt::{signal, trace};
 use std::collections::BTreeMap;
 
+/// Type-variable ids for `local x` with no initializer: a nil-valued name
+/// whose first assignment unifies with anything. Each bare declaration
+/// takes a fresh id counting down from usize::MAX (real site ids count up
+/// from 0), so two bare locals never share a substitution slot.
+const BARE_LOCAL_MAX: usize = usize::MAX;
+
 pub struct TypeChecker<'a> {
     scopes: Vec<BTreeMap<String, StaticType>>,
     shape: &'a mut ShapeFacts,
     substitutions: BTreeMap<usize, StaticType>,
+    bare_next: usize,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -15,10 +22,20 @@ impl<'a> TypeChecker<'a> {
             scopes: vec![BTreeMap::new()],
             shape,
             substitutions: BTreeMap::new(),
+            bare_next: BARE_LOCAL_MAX,
         }
     }
 
     pub fn check_program(&mut self, stmts: &[Stmt]) {
+        // Checker pokes carry no scope context: the scope register belongs
+        // to the shape analyzer's recording walk (ids in first-visit
+        // order), and the checker's independent walk would misattribute
+        // cells to those ids. 0xFF = "no scope" reads cleanly in plate.py.
+        trace::compiler_trace_current_scope(
+            trace::TRACE_SCOPE_PARENT_NONE,
+            0,
+            trace::TRACE_SCOPE_PARENT_NONE,
+        );
         self.check_block(stmts);
         // Apply substitution bindings to all variable scopes so that
         // var_type() always returns fully-resolved types for the lowerer.
@@ -36,7 +53,9 @@ impl<'a> TypeChecker<'a> {
     fn check_block(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             if let Err(msg) = self.check_stmt(stmt) {
-                signal!(trace::TRACE_GHOST_BAIL);
+                // Dedicated slot (the shape analyzer owns TRACE_GHOST_BAIL):
+                // the plate must name WHICH pass poisoned the block.
+                signal!(trace::TRACE_GHOST_BAIL_CHECKER);
                 self.shape.diagnostics.push(msg);
                 return;
             }
@@ -101,6 +120,16 @@ impl<'a> TypeChecker<'a> {
                 for (name, ty) in names.iter().zip(expr_types) {
                     self.declare_var(name.clone(), ty)?;
                 }
+                // `local x` without initializer: declare the name so it
+                // stops falling out of the zip above. The shape layer
+                // already models it as a nil-valued binding (Pending,
+                // NULL_ROOT alias); here it gets its own bare-local
+                // Unknown — the first assignment unifies with any type.
+                for name in &names[exprs.len()..] {
+                    let id = self.bare_next;
+                    self.bare_next -= 1;
+                    self.declare_var(name.clone(), StaticType::Unknown(id))?;
+                }
             }
             Stmt::Assignment { name, expr } => {
                 let expected = self.var_type(name)?;
@@ -109,7 +138,12 @@ impl<'a> TypeChecker<'a> {
                     // exactly like tables, so they are valid nil-release
                     // targets: the shape layer's sole-ownership proof and
                     // the lowerer's TableFree emission are type-agnostic.
-                    if !matches!(expected, StaticType::Table(_) | StaticType::Record(_)) {
+                    // A bare local (unbound Unknown) holds nil already —
+                    // releasing it is a no-op, not a type error.
+                    if !matches!(
+                        expected,
+                        StaticType::Table(_) | StaticType::Record(_) | StaticType::Unknown(_)
+                    ) {
                         return Err(format!(
                             "Type Error: 'nil' releases tables — '{}' is a {}",
                             name,
@@ -200,6 +234,11 @@ impl<'a> TypeChecker<'a> {
             Stmt::Print { exprs } => {
                 for e in exprs {
                     let ty = self.check_expr(e)?;
+                    // BS-6 marker: a record passes this gate (only Table is
+                    // rejected here) and dies later at IR generation.
+                    if matches!(ty, StaticType::Record(_)) {
+                        signal!(trace::TRACE_CHK_PRINT_REC);
+                    }
                     if matches!(ty, StaticType::Table(_)) {
                         return Err(
                             "Type Error: cannot print a table — print its cells or '#t' instead"
@@ -222,6 +261,10 @@ impl<'a> TypeChecker<'a> {
             StaticType::Record(fields) => {
                 // Records are stored as tables internally — field 0 = first value, etc.
                 // Element type is the first field's type.
+                // BS-5 marker: every record index (read AND write) is checked
+                // against field 0's type — the hole that lets a field-0-typed
+                // value compile into any slot.
+                signal!(trace::TRACE_CHK_IDX_REC_FIELD0);
                 let first_ty = fields.first().map(|(_, ty)| ty.clone())
                     .unwrap_or(StaticType::Integer);
                 let desc = type_name(&StaticType::Table(Box::new(first_ty.clone())));
@@ -252,11 +295,16 @@ impl<'a> TypeChecker<'a> {
             Expr::Float(_) => Ok(StaticType::Float),
             Expr::Boolean(_) => Ok(StaticType::Boolean),
             Expr::String(_) => Ok(StaticType::String),
-            Expr::Nil => Err(
-                "Type Error: 'nil' is only valid as the right-hand side of 't = nil' — \
-                 it releases a table's memory, it is not a value"
-                    .to_string(),
-            ),
+            Expr::Nil => {
+                // nil in expression position: poked before the rejection so
+                // the plate maps every nil-value reach, not just the first.
+                signal!(trace::TRACE_CHK_NIL_EXPR);
+                Err(
+                    "Type Error: 'nil' is only valid as the right-hand side of 't = nil' — \
+                     it releases a table's memory, it is not a value"
+                        .to_string(),
+                )
+            }
             Expr::TableCtor(elems) => {
                 let elem = self.shape.elem_of(expr);
                 for e in elems {
@@ -335,6 +383,12 @@ impl<'a> TypeChecker<'a> {
                     BinOp::Equal | BinOp::NotEqual => {
                         if l == StaticType::String || r == StaticType::String {
                             return Err("Type Error: String comparison is not supported yet".to_string());
+                        }
+                        // C.4 marker: record == record passes compatibility
+                        // here, then the backend compares the registers as
+                        // i64 while they hold ptr — clang rejects.
+                        if matches!(l, StaticType::Record(_)) && matches!(r, StaticType::Record(_)) {
+                            signal!(trace::TRACE_CHK_REC_EQ);
                         }
                         if !types_compatible(&l, &r) {
                             return Err(format!(
@@ -426,6 +480,7 @@ impl<'a> TypeChecker<'a> {
 
             // Both Unknown — bind the second to the first (if different IDs).
             (StaticType::Unknown(id_a), StaticType::Unknown(id_b)) if id_a != id_b => {
+                signal!(trace::TRACE_CHK_UNIFY);
                 self.substitutions
                     .insert(*id_b, StaticType::Unknown(*id_a));
                 Ok(())
@@ -433,6 +488,7 @@ impl<'a> TypeChecker<'a> {
 
             // Bind the Unknown to the concrete type.
             (StaticType::Unknown(_), _) | (_, StaticType::Unknown(_)) => {
+                signal!(trace::TRACE_CHK_UNIFY);
                 let (u_id, c_ty) = match (expected, actual) {
                     (StaticType::Unknown(id), ty) => (*id, ty.clone()),
                     (ty, StaticType::Unknown(id)) => (*id, ty.clone()),

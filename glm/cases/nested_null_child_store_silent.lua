@@ -6,7 +6,7 @@
 -- glm_tbl_get early-returns on a null table WITHOUT zero-filling the
 -- destination (rt.rs:201-203), so it reads uninitialized stack —
 -- 0 in one process, 140721637957568 in another. Reproducer and
--- analysis in docs/records-and-memory.md BS-9. Only the allocation
+-- analysis in docs/records_and_memory.md BS-9. Only the allocation
 -- count is stable here: exactly one table (m) was allocated.
 local m = {}
 m[0][0] = 5

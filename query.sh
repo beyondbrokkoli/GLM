@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOC_DIR="$SCRIPT_DIR"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DOC_DIR="$SCRIPT_DIR/docs"
+ROOT="$(cd "$SCRIPT_DIR" && pwd)"
 
 die() { echo "Error: $*" >&2; exit 1; }
 

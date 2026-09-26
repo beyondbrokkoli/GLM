@@ -3,7 +3,7 @@ Recursive-descent parser: turns the lexer's token stream into
 
 Fully Result-based (`Result<T, ParseError>`, `?` bubbling) — no panics on
 user syntax errors. `ParseError(pub String)` carries one user-facing
-"Syntax Error: …" message per failure; the messages are corpus-pinned,
+"Syntax Error: …" message per failure; the messages are stable,
 byte-identical.
 
 [parse_program]

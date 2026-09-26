@@ -17,7 +17,7 @@ live table values. This is the entire alias story.
 
 ALLOC_COUNT — Global live-allocation tracker: incremented on each `glm_tbl_new`,
 decremented on each `glm_tbl_free`. Exposed via `sys_alloc_count()`
-for test harnesses to observe memory leaks at runtime.
+to observe memory leaks at runtime.
 
 [glm_tbl_new]
 # Safety

@@ -12,4 +12,7 @@ glm_runtime_fuzz
 .glm_trace.bin
 .glm_rt_trace.bin
 /docs/skills
-/test.lua
+/minimal.lua
+docs/records_and_memory.md
+docs/signal_map.md
+docs/trace-plate.md

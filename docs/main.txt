@@ -13,6 +13,6 @@ ledger before `build_context`.
 
 The panic hook stays as the residual catch-all (backend tripwires, clang
 failure): pokes slot 1, prints the marker, chains the default hook so
-stderr keeps its exact corpus-pinned format. Trace-plate protocol:
+stderr keeps its exact format. Trace-plate protocol:
 compiler_trace_reset_counts + compiler_trace_scope_reset at startup
 (per-run view), compiler owns bytes >= 128, runtime never writes them.

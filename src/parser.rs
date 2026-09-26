@@ -406,6 +406,7 @@ impl<'a> Parser<'a> {
                     // {name:"a", x:1} produce identical positional layouts.
                     // Stable sort keeps duplicate keys in insertion order.
                     fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    glm_rt::trace::compiler_trace_signal(glm_rt::trace::TRACE_PARSE_REC_CTOR);
                     Ok(Expr::RecordCtor(fields))
                 } else {
                     if !matches!(self.tokens.peek(), Some(Token::RightBrace)) {
@@ -419,6 +420,16 @@ impl<'a> Parser<'a> {
                         }
                     }
                     self.expect(Token::RightBrace)?;
+                    // Constructor census for the map: the empty literal is
+                    // the Pending/F9 root (it can never join a record site),
+                    // non-empty ones are ordinary table ctors.
+                    glm_rt::trace::compiler_trace_signal(
+                        if elems.is_empty() {
+                            glm_rt::trace::TRACE_PARSE_TBL_EMPTY
+                        } else {
+                            glm_rt::trace::TRACE_PARSE_TBL_CTOR
+                        },
+                    );
                     Ok(Expr::TableCtor(elems))
                 }
             }

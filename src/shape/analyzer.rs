@@ -39,6 +39,12 @@ struct Analyzer {
     /// one conflicting table through several paths (parent recursion,
     /// the main loop) and each site is reported once.
     conflict_reported: BTreeSet<usize>,
+    /// Type-movement slots (JOIN_RETYPED, DECIDE_UPDATE*, INFER_TBL_
+    /// CONFLICT) that fired during the fixpoint walks. The recording
+    /// gate hides those walks, so analyze() flushes the set as one mark
+    /// per slot right before the recording walk starts — the map shows
+    /// "convergence moved types here" without inflating per-run counts.
+    conv_fires: BTreeSet<u8>,
 }
 
 pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
@@ -59,6 +65,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         child_sites: BTreeMap::new(),
         diagnostics: Vec::new(),
         conflict_reported: BTreeSet::new(),
+        conv_fires: BTreeSet::new(),
     };
 
     let mut prev_end: Vec<BTreeMap<String, TableShape>> = Vec::new();
@@ -72,6 +79,14 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         if stable {
             break;
         }
+    }
+
+    // Convergence flush: the recording gate hid every fixpoint walk, so
+    // the type-movement slots that fired only during convergence (probe()
+    // below) surface here as exactly one mark each — deterministic order,
+    // before any recording-walk event hits the chronology.
+    for slot in std::mem::take(&mut a.conv_fires) {
+        trace::compiler_trace_signal(slot);
     }
 
     a.recording = true;
@@ -128,6 +143,20 @@ fn get_base_identifier(expr: &Expr) -> Option<&String> {
 }
 
 impl Analyzer {
+    /// Convergence-aware poke for the type-movement slots (JOIN_RETYPED,
+    /// DECIDE_UPDATE*, INFER_TBL_CONFLICT): they fire while the fixpoint
+    /// is still moving types — walks the recording gate excludes — and
+    /// never again on the converged recording walk. During the fixpoint
+    /// they accumulate into conv_fires (flushed once by analyze); during
+    /// the recording walk this pokes the plate directly, like signal!.
+    fn probe(&mut self, slot: u8) {
+        if self.recording {
+            trace::compiler_trace_signal(slot);
+        } else {
+            self.conv_fires.insert(slot);
+        }
+    }
+
     /// Heterogeneous-table conflict found while resolving elem types:
     /// record ONE diagnostic per conflicting site (the resolution tail
     /// can reach a site through several paths) and degrade to Unknown so
@@ -387,6 +416,18 @@ impl Analyzer {
 
                 let (vt, _) = self.infer_expr(value)?;
 
+                // Store-value discrimination for the ownership map: a
+                // record stored into a table is the BS-11 enabler (no
+                // ownership edge, never frees); a table stored into a
+                // table rides the deep-free flag edge.
+                if self.recording {
+                    if matches!(vt, Record(_)) {
+                        signal!(self.recording, trace::TRACE_STMT_IDX_REC_VALUE);
+                    } else if matches!(vt, Tbl(_)) {
+                        signal!(self.recording, trace::TRACE_STMT_IDX_TBL_VALUE);
+                    }
+                }
+
                 let mut base_obj = obj;
                 let mut expected_ty = vt.clone();
 
@@ -561,23 +602,34 @@ impl Analyzer {
 
         let joined = join_ty(&self.site_elem[site], vt);
         if self.site_elem[site] != joined {
-            signal!(self.recording, trace::TRACE_JOIN_RETYPED);
+            self.probe(trace::TRACE_JOIN_RETYPED);
             self.site_elem[site] = joined.clone();
             self.changed = true;
         }
 
         let expected_var_ty = Tbl(Box::new(self.site_elem[site].clone()));
 
-        for scope in &mut self.scopes {
+        // Split borrow: probe bookkeeping (conv_fires) and the scope walk
+        // touch disjoint fields, so both run in one pass.
+        let Self { scopes, conv_fires, recording, changed, .. } = self;
+        for scope in scopes.iter_mut() {
             for ts in scope.values_mut() {
                 if ts.aliases.contains(&site) && site != NULL_ROOT
                     && (ts.ty == Pending || ts.ty != expected_var_ty)
                 {
-                    signal!(self.recording, trace::TRACE_DECIDE_UPDATE);
+                    if *recording {
+                        trace::compiler_trace_signal(trace::TRACE_DECIDE_UPDATE);
+                    } else {
+                        conv_fires.insert(trace::TRACE_DECIDE_UPDATE);
+                    }
                     ts.ty = expected_var_ty.clone();
                     if ts.ty != Pending {
-                        signal!(self.recording, trace::TRACE_DECIDE_UPDATE_CHANGED);
-                        self.changed = true;
+                        if *recording {
+                            trace::compiler_trace_signal(trace::TRACE_DECIDE_UPDATE_CHANGED);
+                        } else {
+                            conv_fires.insert(trace::TRACE_DECIDE_UPDATE_CHANGED);
+                        }
+                        *changed = true;
                     }
                 }
             }
@@ -625,7 +677,7 @@ impl Analyzer {
                         Some(ref expected) if *expected != t => {
                             signal!(self.recording, trace::TRACE_INFER_TBL_MISMATCH);
                             if self.site_elem[id] != Conflict {
-                                signal!(self.recording, trace::TRACE_INFER_TBL_CONFLICT);
+                                self.probe(trace::TRACE_INFER_TBL_CONFLICT);
                                 self.site_elem[id] = Conflict;
                                 self.changed = true;
                             }
@@ -647,9 +699,14 @@ impl Analyzer {
             }
             Expr::RecordCtor(fields) => {
                 let id = self.sites[&(expr as *const Expr)];
+                signal!(self.recording, trace::TRACE_REC_CTOR);
                 let mut record_ty: Vec<(String, Ty)> = Vec::with_capacity(fields.len());
                 for (name, val_expr) in fields {
+                    signal!(self.recording, trace::TRACE_REC_FIELD);
                     let (t, _) = self.infer_expr(val_expr)?;
+                    if matches!(t, Record(_)) {
+                        signal!(self.recording, trace::TRACE_REC_NESTED);
+                    }
                     if matches!(t, Tbl(_))
                         && let Some(&child_site) = self.sites.get(&(val_expr as *const Expr))
                     {
