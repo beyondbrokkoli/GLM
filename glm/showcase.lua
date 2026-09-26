@@ -48,9 +48,10 @@ do
     scoped_data[1] = 888
     print("Scoped data is valid here:")
     print(scoped_data[0])
-    -- The lowerer tracks outer keys. At this lexical boundary, it intercepts
-    -- `scoped_data` and implicitly emits `Instruction::TableFree`.
-    -- The memory is composted instantly. No Garbage Collector involved.
+    -- Shape analysis proves the site is solely owned by this block
+    -- (decide_do_exit); at the lexical boundary the lowerer emits one
+    -- free per site through the ctor's birth register. The memory is
+    -- composted instantly. No Garbage Collector involved.
 end
 
 -- In standard Lua, `nil` is a data type.

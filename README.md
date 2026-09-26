@@ -37,10 +37,6 @@ print("=== GLM Lua Dialect ===")
 print("Phase 1: The 0-Index Direct Memory Offset")
 -- GLM drops Lua's 1-indexing to map directly to physical C-ABI grids.
 -- This eliminates pointer arithmetic padding and aligns with LLVM IR.
--- Constructors are intentionally EMPTY for now: element types are
--- decided by first touch (a store), and populated literals are
--- rejected at parse until the Lua-style constructor (`[k]=v`, `k=v`)
--- lands.
 local matrix = {}
 matrix[0] = 42
 matrix[1] = 99

@@ -788,9 +788,23 @@ impl<'a> IrLowerer<'a> {
                     }
                 }
 
-                // Only flag for deep-free if elements are inline anonymous tables.
+                // [Deep-Free Ownership: stored inline constructors]
+                // A table that received a direct `m[0] = {...}` store also
+                // owns the row: an inline constructor has no binding of its
+                // own, so the parent's bit 7 must cover it (BS-11). The
+                // analyzer proved the transfer on the store's syntax (see
+                // ShapeFacts::stored_ctor_parents), so a named row — which
+                // owns itself — never lands in the set.
+                let is_stored_parent = self
+                    .shape
+                    .sites
+                    .get(&(expr as *const Expr))
+                    .is_some_and(|s| self.shape.stored_ctor_parents.contains(s));
+
+                // Flag for deep-free if elements are inline anonymous
+                // tables, or if this table took a direct inline-ctor store.
                 let contains_tables = matches!(elem, crate::ast::StaticType::Table(_))
-                    && has_inline_tables;
+                    && (has_inline_tables || is_stored_parent);
 
                 let mut elem_regs = Vec::with_capacity(entries.len());
                 for (_, e) in entries {

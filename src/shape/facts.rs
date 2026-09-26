@@ -28,6 +28,16 @@ pub struct ShapeFacts {
     /// runtime register and must not be freed once per site).
     pub do_exit_frees: BTreeMap<*const Stmt, Vec<DoExitFree>>,
     pub name_dense: BTreeMap<(String, usize), bool>,
+    /// Heap sites of tables that received a *syntactically inline*
+    /// `Expr::TableCtor` through a direct `obj[key] = {...}` store on an
+    /// identifier. The row has no binding of its own, so only the
+    /// parent's deep-free flag (TableNew bit 7) can own it — the lowerer
+    /// reads this set when lowering the parent's constructor. Named rows
+    /// (`m[0] = row`) never land here: they own themselves via their own
+    /// binding, and a parent flag would double-free (the BS-11 trap).
+    /// Nested targets (`m[0][1] = {...}`) stay unmarked too — the cell
+    /// may hold a named row; their leak stays bounded and documented.
+    pub stored_ctor_parents: BTreeSet<usize>,
     pub substitutions: BTreeMap<usize, StaticType>,
     /// Localized shape errors from the ghost run: the walk completed and
     /// the plate is whole, but these blocks were poisoned and skipped.

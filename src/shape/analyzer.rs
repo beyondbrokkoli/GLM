@@ -54,6 +54,14 @@ struct Analyzer {
     /// free decision (do-exit, another drop) must refuse them: the
     /// header is gone and re-freeing it reads freed memory.
     freed_sites: BTreeSet<usize>,
+    /// Sites whose tables received a direct inline-ctor store
+    /// (`m[0] = {...}` on an identifier): the anonymous row owns nothing
+    /// of itself, so deep-free ownership transfers to the parent. The
+    /// lowerer consumes this via ShapeFacts::stored_ctor_parents. The
+    /// set only grows (BTreeSet insert, no removal) — fixpoint walks and
+    /// the recording walk accumulate into it monotonically, so the plate
+    /// stays deterministic.
+    stored_ctor_parents: BTreeSet<usize>,
 }
 
 pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
@@ -77,6 +85,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         conv_fires: BTreeSet::new(),
         do_exit_frees: BTreeMap::new(),
         freed_sites: BTreeSet::new(),
+        stored_ctor_parents: BTreeSet::new(),
     };
 
     let mut prev_end: Vec<BTreeMap<String, TableShape>> = Vec::new();
@@ -141,6 +150,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         free_sites: a.free_sites,
         do_exit_frees: a.do_exit_frees,
         name_dense: a.name_dense,
+        stored_ctor_parents: a.stored_ctor_parents,
         substitutions: BTreeMap::new(),
         diagnostics: a.diagnostics,
     }
@@ -395,7 +405,7 @@ impl Analyzer {
             }
 
             Stmt::IndexAssign { obj, key, value } => {
-                let (t, _) = self.infer_expr(obj)?;
+                let (t, obj_sites) = self.infer_expr(obj)?;
                 self.infer_expr(key)?;
                 self.check_table_use(obj)?;
                 self.check_uses(obj)?;
@@ -408,6 +418,24 @@ impl Analyzer {
                 // when inline; a named child owns itself.
                 if self.recording && matches!(vt, Tbl(_)) {
                     signal!(self.recording, trace::TRACE_STMT_IDX_TBL_VALUE);
+                }
+
+                // Ownership transfer for the anonymous row (BS-11): an
+                // inline constructor stored directly into an identifier's
+                // table has no binding of its own, so only the parent's
+                // deep-free flag can own it. The guard keys on the value
+                // being SYNTACTICALLY inline — a named row (`m[0] = row`)
+                // owns itself via its binding and flagging the parent
+                // would double-free — and on a DIRECT store: a nested
+                // target (`m[0][1] = {...}`) stays unmarked because the
+                // cell may hold a named row (bounded, documented leak).
+                if let (Expr::Identifier(_), Expr::TableCtor(_)) = (obj, value) {
+                    for &s in &obj_sites {
+                        if s != NULL_ROOT {
+                            self.stored_ctor_parents.insert(s);
+                            signal!(self.recording, trace::TRACE_STMT_IDX_STORED_CTOR);
+                        }
+                    }
                 }
 
                 let mut base_obj = obj;

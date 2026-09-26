@@ -51,7 +51,7 @@ entry:
   br label %b0
 
 b0:
-  %v0 = call ptr @glm_tbl_new(i64 8, i8 0)
+  %v0 = call ptr @glm_tbl_new(i64 8, i8 128)
   %v2 = add i64 0, 0
   %v3 = call ptr @glm_tbl_new(i64 8, i8 0)
   store ptr %v3, ptr %ts0.valp

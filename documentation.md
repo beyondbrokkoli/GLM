@@ -178,6 +178,11 @@ slots/named keys/dynamic keys are parse errors)
 - 88 STMT_IDX_REC_VALUE **(dead: record machinery removed)** — was the
   BS-11 enabler.
 - 89 STMT_IDX_TBL_VALUE — table stored into a table (deep-free edge).
+- 126 STMT_IDX_STORED_CTOR — an inline ctor stored directly into an
+  identifier's table (`m[0] = {...}`): the anonymous row owns nothing
+  of itself, so deep-free ownership transfers to the parent — the
+  lowerer ORs the parent's site into TableNew bit 7 (the BS-11 fix).
+  Named rows and nested targets never fire it (the trap stays shut).
 
 Checker (scope-less by design)
 - 73 GHOST_BAIL_CHECKER — first checker error poisons the block.
@@ -214,7 +219,7 @@ Backend / runtime (boolean-only)
 - 90 FAIL_LEAK_DETECTED — nonzero ALLOC_COUNT at process exit.
 
 Free slots (book nothing here without checking the file first):
-71, 79, 126–127. The record family (15, 22, 57, 74, 75, 78, 82,
+71, 79, 127. The record family (15, 22, 57, 74, 75, 78, 82,
 85–88, 97, 115) is dead with the machinery REMOVED — permanently
 retired, free for reuse. Still-alive-alarm dead slots: 58, 91, 93,
 102 (a fire means the analyzer structure changed). 83 revived with the
@@ -234,7 +239,6 @@ its pinned case. A refactor that moves one shows up as a delta there.
 | record_* colon guards (9 files) | GHOST_BAIL_PARSER(1), nothing else — the `{k: v}` parse rejection is the pin (the record signals are retired with the machinery) |
 | ctor_mixed/nested_mixed/scalar_table_mix/int_float_mix | INFER_TBL_MISMATCH(1) + INFER_TBL_CONFLICT(1) + SHAPE_CONFLICT_GUARD(1) — the heterogeneous refusal fingerprint |
 | ctor_named_key/dup_index/dyn_key_rejected | GHOST_BAIL_PARSER(1) — parse-level, exactly the record_* shape |
-| ctor_in_table_leak (BS-11 successor) | STMT_IDX_TBL_VALUE(1); sys_alloc_count prints 1 — the bounded stored-ctor leak, pinned knowingly |
 
 Fixed-by-refactor (kept as regression pins):
 `do_exit_alias_double_free_crash` — DO_EXIT_FREE_SITE + DO_EXIT_
@@ -243,6 +247,10 @@ FREE_SHARED + DO_EXIT_FREE_DEFREG, freed once, no abort.
 FREE_SITE(2) + DO_EXIT_FREE_SHARED(1) + DO_EXIT_FREE_DEFREG(2): both
 join inputs freed through their birth registers, the phi untouched,
 sys_alloc_count() = 0.
+`ctor_in_table_leak` (BS-11, fixed) — STMT_IDX_TBL_VALUE(1) +
+STMT_IDX_STORED_CTOR(1): the inline row's ownership transfer is proved
+at the store, the parent's TableNew carries bit 7, and sys_alloc_
+count() = 0 — the do-exit deep free composts the anonymous row.
 `do_exit_join_phi_free` — DO_EXIT_FREE_SITE(1) + DO_EXIT_FREE_PHI(1):
 conditional site freed through the carrier's join register.
 `nil_free_lifecycle` (loop-drop sub-case) — DO_EXIT_FREE_DROPPED(1)

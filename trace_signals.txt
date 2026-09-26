@@ -165,3 +165,4 @@
 123 INFER_UNOP_NOT         analyzer  infer_expr: unop not
 124 INFER_UNOP_LEN         analyzer  infer_expr: unop len
 125 INFER_SYSALLOC         analyzer  infer_expr: sys alloc count
+126 STMT_IDX_STORED_CTOR   analyzer  walk_stmt: inline ctor stored directly into an identifier's table — deep-free ownership transfers to the parent (BS-11 fix)
