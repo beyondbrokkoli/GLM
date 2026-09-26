@@ -50,10 +50,10 @@ runs these contract checks for you.
 
 | pass | signals | scope-tagged |
 |---|---|---|
-| parser | 69, 82–84 | no (runs before the scope walk) |
-| shape analyzer | 2–29, 31–49, 51–59, 61–68, 80, 85–89, 91–125 | yes |
+| parser | 69, 84 | no (runs before the scope walk) |
+| shape analyzer | 2–9, 31–49, 51–59, 61–68, 80, 85–89, 91–125 | yes |
 | type checker | 73–78 | no (analyzer owns the ids) |
-| lowerer | 72 | scope 0 on bail only |
+| lowerer | 5–7 (do-exit emission), 72 | 5–7 root scope; 72 scope 0 on bail |
 | backend | 30, 81 | boolean-only |
 | runtime | 50, 60, 70, 90 (sidecar) | boolean-only |
 | build status | 0, 1 | boolean-only |
@@ -76,11 +76,26 @@ Build status
 
 Do-exit ownership (the scope-exit face of the `t = nil` proof)
 - 2 DO_EXIT_FREE_SITE — heap site proved solely owned by the dying
-  do-block; one TableFree emitted. Trigger: `do local t = {} end`.
+  do-block; one free handed to the lowerer. Trigger: `do local t = {} end`.
 - 3 DO_EXIT_FREE_SHARED — site held by several dying bindings; deduped
   to one free. Trigger: `do local c = {}; local b = c end`.
 - 4 DO_EXIT_ALIAS_SURVIVES — block-local aliases a site owned outside
   the block; rejected at compile time (was a silent early free / UAF).
+- 5 DO_EXIT_FREE_DEFREG — lowerer freed the site through its TableNew
+  birth register (ctor dominating the exit; the header never moves, so
+  the birth register holds it on every path — the join-phi-proof fix).
+- 6 DO_EXIT_FREE_PHI — lowerer freed a conditional site (ctor in an
+  if-arm / loop body) through the carrier name's join register: header
+  or null, both free-safe operands.
+- 7 DO_EXIT_JOIN_LEAK — lowerer refused a free: the only sound register
+  (a join phi) may alias a birth register freed at the same exit;
+  bounded leak chosen over double free (same trade FAIL_ALIAS_UNION
+  makes for `t = nil`).
+- 8 DO_EXIT_FREE_DROPPED — do-exit skipped a dying site: a nil-drop
+  inside the block already composted it (loop merges resurrect the
+  alias; the header is dead at runtime).
+- 9 DROP_STALE_SITE — nil-drop refused: sole ownership proved, but the
+  site was already composted by an earlier drop (the killed-sites set).
 
 Binding & statements
 - 10 BIND_SCALAR — scalar (or nil/bare-local filler) binding.
@@ -133,7 +148,8 @@ Resolution (post-fixpoint)
 - 28 ANALYZE_PENDING — site never decided → Unknown.
 - 29 ANALYZE_RESOLVED — site classified.
 - 21 SHAPE_CONFLICT_GUARD — Conflict guard in elem_type_of_tbl.
-- 22 RECORD_PRESERVED — Record beats the child fast path.
+- 22 RECORD_PRESERVED **(dead: constructor cut)** — Record beats the
+  child fast path.
 - 23 CHILD_FAST_PATH — multi-child coherence path taken.
 - 24 FALLBACK_RESOLVE — final match fallback taken.
 - 91 ELEM_CHILD_CONFLICT **(dead)** — parent conflicts first.
@@ -146,16 +162,19 @@ Resolution (post-fixpoint)
   ELEM_FALLBACK_CONFLICT **(dead: early Conflict guard returns first)**.
 - 51 TY_STATIC_INT / 52 TY_STATIC_PENDING / 53 TY_STATIC_FLT /
   54 TY_STATIC_BOOL / 55 TY_STATIC_STR / 56 TY_STATIC_TBL /
-  57 TY_STATIC_REC / 58 TY_STATIC_CONFLICT **(dead: join_ty flattens
-  Tbl(Conflict) before resolution sees it)** — Ty→StaticType.
+  57 TY_STATIC_REC **(dead: constructor cut)** / 58 TY_STATIC_CONFLICT
+  **(dead: join_ty flattens Tbl(Conflict) before resolution sees it)**
+  — Ty→StaticType.
 
 Constructor census
-- 82 PARSE_REC_CTOR / 83 PARSE_TBL_CTOR / 84 PARSE_TBL_EMPTY — one per
-  literal parsed (84 is the F9/Pending tripwire for the future
-  Lua-syntax constructor work).
-- 85 REC_CTOR / 86 REC_FIELD / 87 REC_NESTED — record sites/fields/
-  nesting at inference.
-- 88 STMT_IDX_REC_VALUE — record stored into a table (BS-11 enabler).
+- 82 PARSE_REC_CTOR / 83 PARSE_TBL_CTOR **(dead: constructor cut —
+  populated literals are rejected at parse; only `{}` parses)** /
+  84 PARSE_TBL_EMPTY — one per literal parsed (84 is the F9/Pending
+  tripwire for the future Lua-syntax constructor work).
+- 85 REC_CTOR / 86 REC_FIELD / 87 REC_NESTED **(dead: constructor
+  cut)** — record sites/fields/nesting at inference.
+- 88 STMT_IDX_REC_VALUE **(dead: constructor cut)** — record stored
+  into a table (BS-11 enabler).
 - 89 STMT_IDX_TBL_VALUE — table stored into a table (deep-free edge).
 
 Checker (scope-less by design)
@@ -192,9 +211,10 @@ Backend / runtime (boolean-only)
 - 90 FAIL_LEAK_DETECTED — nonzero ALLOC_COUNT at process exit.
 
 Free slots (book nothing here without checking the file first):
-5–9, 71, 79, 126–127. Reusing **(dead)** slots (58, 91, 93, 97, 102)
-is acceptable only if the 127-slot cap is approached — it costs their
-alarm value.
+71, 79, 126–127. Reusing **(dead)** slots (22, 57, 58, 74, 75, 78, 82,
+83, 85–88, 91, 93, 97, 102) is acceptable only if the 127-slot cap is
+approached — it costs their alarm value. The constructor-cut dead slots
+revive when the Lua-style constructor redesign lands.
 
 ### 1.4 Pinned bug fingerprints
 
@@ -203,18 +223,24 @@ its pinned case. A refactor that moves one shows up as a delta there.
 
 | case (glm/cases/) | fingerprint |
 |---|---|
-| record_positional_write_wrong_slot_accepted (BS-5) | CHK_IDX_REC_FIELD0(2), no bail |
-| record_positional_write_int_rejected (BS-5 mirror) | CHK_IDX_REC_FIELD0(1) + GHOST_BAIL_CHECKER(1) |
-| record_use_after_drop_rejected | GHOST_BAIL(1) + CHK_TBL_NIL + SHAPE_DROP + INFER_IDX_BAD_OBJ |
-| record_equality_compare_ir_fail (C.4) | CHK_REC_EQ(1), no bail anywhere |
-| record_in_table_first_touch_leak (BS-11) | STMT_IDX_REC_VALUE(1) + RECORD_PRESERVED(2) |
 | nested_null_child_store_silent (BS-8/9) | STMT_IDX_NESTED(1) + ELEM_FALLBACK_TBL(1) |
 | do_exit_alias_survives_rejected (contained) | DO_EXIT_ALIAS_SURVIVES + GHOST_BAIL |
-| do_exit_alias_join_double_free (residual of the do-exit refactor) | DO_EXIT_FREE_SITE(2), no DO_EXIT_FREE_SHARED, no bail — exit frees go through the join phi, the header frees twice |
+| do_exit_join_hazard_leak (contained leak) | DO_EXIT_FREE_SITE(2) + DO_EXIT_FREE_DEFREG(1) + DO_EXIT_JOIN_LEAK(1) |
+| nil_free_stale_redrop (killed-site proof) | SHAPE_DROP(1) + DROP_STALE_SITE(2) |
+| record_* ctor-cut guards (9 files) | GHOST_BAIL_PARSER(1), nothing else — the parse rejection is the pin; re-acceptance fires the record signals (22, 74, 75, 78, 85–88) and fails the pin |
 
 Fixed-by-refactor (kept as regression pins):
 `do_exit_alias_double_free_crash` — DO_EXIT_FREE_SITE + DO_EXIT_
-FREE_SHARED, free emitted once, no abort.
+FREE_SHARED + DO_EXIT_FREE_DEFREG, freed once, no abort.
+`do_exit_alias_join_double_free` (the do-exit residual) — DO_EXIT_
+FREE_SITE(2) + DO_EXIT_FREE_SHARED(1) + DO_EXIT_FREE_DEFREG(2): both
+join inputs freed through their birth registers, the phi untouched,
+sys_alloc_count() = 0.
+`do_exit_join_phi_free` — DO_EXIT_FREE_SITE(1) + DO_EXIT_FREE_PHI(1):
+conditional site freed through the carrier's join register.
+`nil_free_lifecycle` (loop-drop sub-case) — DO_EXIT_FREE_DROPPED(1)
++ DROP_STALE_SITE(1) among its 6 defreg frees: the killed-sites set
+refusing what the loop merge resurrected.
 
 ---
 

@@ -1,15 +1,12 @@
--- EXPECT: 1
--- BASELINE: wrong-but-current, now the RESIDUAL gap after strikes
--- 1-4. The outer table m is Table-typed and frees at block exit; the
--- stored record does not: it entered via first-touch store, not an
--- inline constructor, so no ownership edge exists for the deep-free
--- flag — proving it would require new analysis (an anonymous value
--- stored into m[0] is only reachable through m, but named records
--- stored the same way are owned elsewhere). Documented in
--- docs/records_and_memory.md as BS-11, the remaining ownership-model
--- gap.
+-- glm/cases/record_in_table_first_touch_leak.lua
+-- (former leak pin, BS-11) a record stored into a table never freed — no ownership edge for stored values.
+--
+-- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
+-- at parse until the Lua-style constructor redesign lands. The case
+-- stays as a guard — the stored-value ownership returns with the redesign; the ctor rejection fires first today.
+-- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
 do
-  local m = {}
-  m[0] = { x: 1, name: "a" }
+local m = {}
+m[0] = { x: 1, name: "a" }
 end
 print(sys_alloc_count())

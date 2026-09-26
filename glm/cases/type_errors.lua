@@ -15,19 +15,12 @@ do
     print(t)
 end
 
--- record_len_rejected.lua: #record is rejected — the Len gate matches
--- Table(_) only.
--- EXPECT_BUILD_FAIL: '#' requires a table operand
-do
-    local r = { x: 1, name: "a" }
-    print(#r)
-end
-
 -- float_table_assign_inttable.lua: a FloatTable variable refuses a
 -- fresh empty constructor — the types cannot unify.
 -- EXPECT_BUILD_FAIL: cannot assign
 do
-    local t = {0.5}
+    local t = {}
+    t[0] = 0.5
     t = {}
 end
 
@@ -44,29 +37,6 @@ end
 -- EXPECT_BUILD_FAIL: 'nil' is only valid as the right-hand side of 't = nil'
 do
     local nl = nil
-end
-
--- record_nonfirst_field_print_rejected.lua: first-field typing (BS-2
--- family): the checker types r[1] with field 0's type (Table(Int))
--- instead of label's Str, so the non-first field is unprintable
--- through any path. The lowerer would have typed it correctly —
--- checker/lowerer desync.
--- EXPECT_BUILD_FAIL: cannot print a table
-do
-    local inner_tbl = { 42 }
-    local rn = { data: inner_tbl, label: "nested" }
-    print(rn[1])
-end
-
--- record_positional_write_field0_typing.lua: first-field typing (BS-5,
--- unfixed): every record index is checked against field 0's type only.
--- After canonicalization field 0 is name:Str, so an Int write to slot
--- 1 panics. (The mirror hole — Str writes into the x:Int slot — is
--- compile-accepted; see record_positional_write_wrong_slot_accepted.)
--- EXPECT_BUILD_FAIL: type conflict
-do
-    local p = { x: 10, name: "init" }
-    p[1] = 5
 end
 
 -- table_cond.lua: conditions must be Boolean — a table value is

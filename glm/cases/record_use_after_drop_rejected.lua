@@ -1,11 +1,12 @@
--- EXPECT_BUILD_FAIL: Lifetime Error: 't' may be nil here
--- Use-after-drop, kept standalone: a name dropped by t = nil is
--- poisoned for the rest of its scope — table reads, stores, and '#'
--- through a possibly-nil name are rejected at compile time. A drop
--- under an if poisons the name too (the scope merge carries the null
--- possibility). Semantics documented in docs/records_and_memory.md
--- A.1.
-local t = {}
-t[0] = 7
-t = nil
-print(t[0])
+-- glm/cases/record_use_after_drop_rejected.lua
+-- (former) reads through a nil-dropped record name rejected at compile time.
+--
+-- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
+-- at parse until the Lua-style constructor redesign lands. The case
+-- stays as a guard — the drop poisoning returns with the redesign.
+-- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
+do
+local r = { x: 1, name: "a" }
+r = nil
+print(r[0])
+end

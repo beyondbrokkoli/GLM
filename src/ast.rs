@@ -62,6 +62,10 @@ pub enum Expr {
     String(String),
     Nil,
     TableCtor(Vec<Expr>),
+    /// Parked by the constructor cut: nothing constructs records since
+    /// the `{k: v}` syntax was rejected at parse — the analyzer through
+    /// backend arms stay wired for the Lua-style constructor redesign.
+    #[allow(dead_code)]
     RecordCtor(Vec<(String, Expr)>),
     Identifier(String),
     Index {

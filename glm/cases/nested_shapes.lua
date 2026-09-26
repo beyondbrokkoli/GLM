@@ -1,8 +1,10 @@
 -- glm/cases/nested_shapes.lua — combo: nesting shapes — tables in
--- tables (constructor and index-assigned) and records held in table
--- slots. Each case below is a former standalone positive case,
--- isolated in its own do-block; the EXPECT pins concatenate in file
--- order.
+-- tables built every legal way (index-assigned children, aliased
+-- rows, 2D spines) now that populated constructors are cut. Each case
+-- below is a former standalone positive case, isolated in its own
+-- do-block; the EXPECT pins concatenate in file order. The former
+-- record-in-table sections moved to the constructor-rejection pins
+-- (record_in_table_first_touch_leak and friends).
 
 -- table_nested.lua: nested table via index assignment.
 -- EXPECT: 0
@@ -12,28 +14,39 @@ t[0] = {}
 print(t[0][0])
 end
 
--- table_nested_ctor.lua: nested table via constructor elements.
+-- table_nested_alias.lua: nested table via an aliased row (the
+-- constructor-cut rewrite of the old '{inner}' literal: the row is
+-- its own binding, stored into the spine).
 -- EXPECT: 0
 do
 local inner = {}
-local t = {inner}
+local t = {}
+t[0] = inner
 print(t[0][0])
 end
 
--- nested_tables.lua: 2D matrix via constructor.
+-- nested_tables.lua: 2D matrix, store-built rows.
 -- EXPECT: 1
 -- EXPECT: 2
 -- EXPECT: 3
 -- EXPECT: 4
 do
-local mat = {{1, 2}, {3, 4}}
+local r0 = {}
+r0[0] = 1
+r0[1] = 2
+local r1 = {}
+r1[0] = 3
+r1[1] = 4
+local mat = {}
+mat[0] = r0
+mat[1] = r1
 print(mat[0][0])
 print(mat[0][1])
 print(mat[1][0])
 print(mat[1][1])
 end
 
--- nested_homogeneous.lua: 2D integer matrix, constructor + cell
+-- nested_homogeneous.lua: 2D integer matrix, store-built + cell
 -- mutation.
 -- EXPECT: 42
 -- EXPECT: 2
@@ -41,31 +54,19 @@ end
 -- EXPECT: 4
 -- EXPECT: 8
 do
-local m = {{1, 2}, {3, 4}}
+local r0 = {}
+r0[0] = 1
+r0[1] = 2
+local r1 = {}
+r1[0] = 3
+r1[1] = 4
+local m = {}
+m[0] = r0
+m[1] = r1
 m[0][0] = 42
 print(m[0][0])
 print(m[0][1])
 print(m[1][0])
 print(m[1][1])
 print(#m)
-end
-
--- nested_conflict_assign.lua: records with matching keys but mixed
--- field types compile cleanly. Each record in the table has the same
--- shape {name: Str, x: Int} (canonicalized alphabetical slot order).
--- EXPECT: hello	1	world	2
-do
-local m = {}
-m[0] = {x: 1, name: "hello"}
-m[1] = {x: 2, name: "world"}
-print(m[0][0], m[0][1], m[1][0], m[1][1])
-end
-
--- nested_conflict_ctor.lua: canonicalized record slots: fields are
--- sorted alphabetically at parse time, so slot 0 = name, slot 1 = x
--- (pre-canonicalization golden was '0\thero').
--- EXPECT: hero	0
-do
-local player = { x: 0, name: "hero" }
-print(player[0], player[1])
 end

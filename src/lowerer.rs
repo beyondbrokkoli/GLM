@@ -3,12 +3,30 @@
 use crate::ast::{BinOp, Expr, StaticType, Stmt, UnOp};
 use crate::ir::{BasicBlock, BlockId, Instruction, IrProgram, RegId, Terminator};
 use crate::shape::{LayoutVerdict, ShapeFacts};
+use glm_rt::{signal, trace};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A localized lowering failure: one user-facing message, created at the
 /// detection site and ledgered at `lower_program`. Ghost run contract —
 /// never a panic.
 pub struct LowerError(pub String);
+
+/// The type a join phi carries when its arms disagree. A heap type
+/// (Table/Record) beats the bare-local Integer placeholder: the phi
+/// holds the header or null on the arms, and ptr storage covers both —
+/// an Integer-typed phi over ptr inputs is invalid IR (clang rejects
+/// "'%v' defined with type 'ptr' but expected 'i64'"). Checker
+/// unification rejects every other disagreement before lowering, so
+/// the final fallback is unreachable in practice.
+fn join_phi_ty(a: &StaticType, b: &StaticType) -> StaticType {
+    if a == b {
+        return a.clone();
+    }
+    let heap = |t: &StaticType| matches!(t, StaticType::Table(_) | StaticType::Record(_));
+    // Heap wins over the bare-local placeholder; any other disagreement
+    // the checker already rejected, so the backedge type is the answer.
+    if heap(a) { a.clone() } else { b.clone() }
+}
 
 #[derive(Clone)]
 struct Local {
@@ -33,6 +51,17 @@ pub struct IrLowerer<'a> {
     scopes: Vec<BTreeMap<String, Local>>,
     loop_ctxs: Vec<LoopCtx>,
     shape: &'a ShapeFacts,
+    /// Birth register of every heap site: the TableNew result and the
+    /// control-nesting depth at which it was emitted. The header never
+    /// moves (alias invariant), so a dominating TableNew register holds
+    /// its site's header on every path — the one sound free handle.
+    site_regs: BTreeMap<usize, (RegId, u32)>,
+    /// Current non-linear control depth: 0 in straight-line code, one
+    /// per enclosing if-arm / while-body / and-or value block. A ctor
+    /// emitted at the same depth as a later do-exit dominates that
+    /// exit; deeper ctors are conditional and only reach the exit
+    /// through a join phi.
+    ctrl_depth: u32,
 }
 
 impl<'a> IrLowerer<'a> {
@@ -45,6 +74,8 @@ impl<'a> IrLowerer<'a> {
             scopes: vec![BTreeMap::new()],
             loop_ctxs: Vec::new(),
             shape,
+            site_regs: BTreeMap::new(),
+            ctrl_depth: 0,
         }
     }
 
@@ -112,6 +143,16 @@ impl<'a> IrLowerer<'a> {
     }
 
     pub fn lower_program(&mut self, stmts: &[Stmt]) -> IrProgram {
+        // Lowerer pokes tag the root scope, same convention as the
+        // GHOST_BAIL_LOWERER bracket below: the analyzer's scope
+        // register is not this pass's to use, and root (not 0xFF)
+        // keeps the do-exit emission signals visible in the scope
+        // histogram.
+        glm_rt::trace::compiler_trace_current_scope(
+            0,
+            0,
+            glm_rt::trace::TRACE_SCOPE_PARENT_NONE,
+        );
         for stmt in stmts {
             match self.lower_stmt(stmt) {
                 Ok(_) => {}
@@ -410,9 +451,11 @@ impl<'a> IrLowerer<'a> {
 
                 self.current_block = body_block;
                 self.scopes.push(BTreeMap::new());
+                self.ctrl_depth += 1;
                 for s in body {
                     self.lower_stmt(s)?;
                 }
+                self.ctrl_depth -= 1;
                 self.scopes.pop();
                 if conv.is_some() {
                     self.loop_ctxs.pop();
@@ -424,10 +467,16 @@ impl<'a> IrLowerer<'a> {
                 for (var, phi_reg) in &phis {
                     let back_edge_local = self.read_var(var)?;
                     for instr in &mut self.blocks[header_block].instrs {
-                        if let Instruction::Phi { target, args, .. } = instr
+                        if let Instruction::Phi { target, ty, args } = instr
                             && *target == *phi_reg
                         {
                             args.push((end_of_body, back_edge_local.reg));
+                            // The phi was emitted with the pre-loop type
+                            // before the body existed; a body that first
+                            // binds the var to a table (bare local) must
+                            // retypes the phi or it carries i64 over ptr
+                            // inputs — invalid IR.
+                            *ty = join_phi_ty(ty, &back_edge_local.ty);
                             break;
                         }
                     }
@@ -448,24 +497,74 @@ impl<'a> IrLowerer<'a> {
                 }
 
                 // [Ownership at scope exit] The analyzer owns the proof
-                // (shape::decide_do_exit): one name per heap site proved
-                // solely owned by this block. Emission stays here —
-                // per-site, not per-name, so intra-block aliasing
-                // cannot double-free and surviving-owned sites are
-                // rejected upstream instead of freed early.
-                let free_names = self.shape.do_exit_frees.get(&(stmt as *const Stmt));
-                let mut regs: Vec<RegId> = match free_names {
-                    Some(names) => names
-                        .iter()
-                        .map(|name| Ok(self.read_var(name)?.reg))
-                        .collect::<Result<Vec<_>, LowerError>>()?,
-                    None => Vec::new(),
-                };
-                // [Determinism Fix] sort by register id so the
-                // block-exit frees emit in reverse construction
-                // order (LIFO) and codegen stays byte-identical.
-                regs.sort_unstable_by_key(|reg| *reg);
-                for reg in regs.into_iter().rev() {
+                // (shape::decide_do_exit): one DoExitFree per heap site
+                // proved solely owned by this block. Emission stays here
+                // and is per SITE, never per name — a dying name whose
+                // binding is an if-join over several sites is ONE runtime
+                // register, and freeing it once per site freed the join
+                // phi's header twice (the do_exit_alias_join_double_free
+                // residual). Register choice per site:
+                //   - ctor dominating the exit (ctrl depth equal): free
+                //     the TableNew birth register — the header never
+                //     moves, so it holds this site's header on every
+                //     path, whichever way the joins resolved;
+                //   - conditional ctor (if-arm / loop body): free the
+                //     carrier name's join register — it holds the header
+                //     or null, both free-safe — unless it may alias a
+                //     register already freed at this exit, in which case
+                //     the site leaks on some path (bounded, loud on the
+                //     plate) instead of double-freeing.
+                let frees = self
+                    .shape
+                    .do_exit_frees
+                    .get(&(stmt as *const Stmt))
+                    .cloned()
+                    .unwrap_or_default();
+
+                // Defining registers first: they are unconditionally
+                // sound and anchor the alias-hazard set the phi pass
+                // checks against.
+                let mut freed_roots: BTreeSet<RegId> = BTreeSet::new();
+                let mut free_regs: Vec<RegId> = Vec::new();
+                for f in &frees {
+                    let Some(&(reg, depth)) = self.site_regs.get(&f.site) else {
+                        continue;
+                    };
+                    if depth == self.ctrl_depth {
+                        signal!(trace::TRACE_DO_EXIT_FREE_DEFREG);
+                        freed_roots.insert(reg);
+                        free_regs.push(reg);
+                    }
+                }
+                for f in &frees {
+                    if self
+                        .site_regs
+                        .get(&f.site)
+                        .is_some_and(|&(_, depth)| depth == self.ctrl_depth)
+                    {
+                        continue; // already freed through its birth register
+                    }
+                    let carrier_reg = self.read_var(&f.carrier)?.reg;
+                    let roots = self.alias_roots(carrier_reg);
+                    if roots.iter().any(|r| freed_roots.contains(r)) {
+                        // The join register may hold a header another
+                        // free at this exit already covers — freeing it
+                        // would double-free on some path. Leak the site
+                        // instead; DO_EXIT_JOIN_LEAK is the tripwire.
+                        signal!(trace::TRACE_DO_EXIT_JOIN_LEAK);
+                        continue;
+                    }
+                    signal!(trace::TRACE_DO_EXIT_FREE_PHI);
+                    freed_roots.extend(roots);
+                    free_regs.push(carrier_reg);
+                }
+
+                // [Determinism] sort by register id so the block-exit
+                // frees emit in reverse construction order (LIFO) and
+                // codegen stays byte-identical.
+                free_regs.sort_unstable_by_key(|reg| *reg);
+                free_regs.dedup();
+                for reg in free_regs.into_iter().rev() {
                     self.emit(Instruction::TableFree { table: reg });
                 }
 
@@ -517,28 +616,42 @@ impl<'a> IrLowerer<'a> {
 
                 self.current_block = then_block;
                 self.scopes.push(BTreeMap::new());
+                self.ctrl_depth += 1;
                 for s in then_body {
                     self.lower_stmt(s)?;
                 }
+                self.ctrl_depth -= 1;
                 self.scopes.pop();
                 let then_end = self.current_block;
-                let then_regs: Vec<(String, RegId)> = phi_order
+                // Arm-exit state captured BEFORE the snapshot restore:
+                // types included, so the join phi can carry the arms'
+                // joined type instead of the stale pre-if one (a bare
+                // local first assigned a table inside an arm).
+                let then_regs: Vec<(String, RegId, StaticType)> = phi_order
                     .iter()
-                    .map(|(name, _)| Ok((name.clone(), self.read_var(name)?.reg)))
+                    .map(|(name, _)| {
+                        let local = self.read_var(name)?;
+                        Ok((name.clone(), local.reg, local.ty))
+                    })
                     .collect::<Result<Vec<_>, LowerError>>()?;
                 self.terminate(Terminator::Jump(join_block));
 
                 self.scopes = snapshot;
                 self.current_block = else_block;
                 self.scopes.push(BTreeMap::new());
+                self.ctrl_depth += 1;
                 for s in else_body {
                     self.lower_stmt(s)?;
                 }
+                self.ctrl_depth -= 1;
                 self.scopes.pop();
                 let else_end = self.current_block;
-                let else_regs: Vec<(String, RegId)> = phi_order
+                let else_regs: Vec<(String, RegId, StaticType)> = phi_order
                     .iter()
-                    .map(|(name, _)| Ok((name.clone(), self.read_var(name)?.reg)))
+                    .map(|(name, _)| {
+                        let local = self.read_var(name)?;
+                        Ok((name.clone(), local.reg, local.ty))
+                    })
                     .collect::<Result<Vec<_>, LowerError>>()?;
                 self.terminate(Terminator::Jump(join_block));
 
@@ -546,12 +659,13 @@ impl<'a> IrLowerer<'a> {
                 for (i, (name, _)) in phi_order.iter().enumerate() {
                     let phi_reg = self.next_reg();
                     let local = self.read_var(name)?;
+                    let ty = join_phi_ty(&then_regs[i].2, &else_regs[i].2);
                     self.emit(Instruction::Phi {
                         target: phi_reg,
-                        ty: local.ty.clone(),
+                        ty: ty.clone(),
                         args: vec![(then_end, then_regs[i].1), (else_end, else_regs[i].1)],
                     });
-                    self.update_var(name, phi_reg, local.ty.clone(), local.layout)?;
+                    self.update_var(name, phi_reg, ty, local.layout)?;
                 }
             }
         }
@@ -574,6 +688,42 @@ impl<'a> IrLowerer<'a> {
             Expr::Index { obj, .. } => self.lookup_layout_for(obj),
             _ => Ok(LayoutVerdict::default()),
         }
+    }
+
+    /// The defining instruction of `reg`, if any (linear scan — scripts
+    /// are small and this runs only at do-exits).
+    fn def_of(&self, reg: RegId) -> Option<&Instruction> {
+        self.blocks
+            .iter()
+            .find_map(|b| b.instrs.iter().find(|i| i.def_reg() == Some(reg)))
+    }
+
+    /// The set of birth registers whose runtime value `reg` may hold:
+    /// a Move collapses to its source (table moves are identity GEP-0
+    /// aliases of the same header), a Phi expands to its inputs.
+    /// Terminal registers (TableNew results, LoadNull, loads) are their
+    /// own roots. This is the alias truth the do-exit hazard check
+    /// needs: two registers with intersecting roots may hold the same
+    /// header, so freeing both would double-free.
+    fn alias_roots(&self, reg: RegId) -> BTreeSet<RegId> {
+        let mut roots = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut stack = vec![reg];
+        while let Some(r) = stack.pop() {
+            if !visited.insert(r) {
+                continue;
+            }
+            match self.def_of(r) {
+                Some(Instruction::Move { source, .. }) => stack.push(*source),
+                Some(Instruction::Phi { args, .. }) => {
+                    stack.extend(args.iter().map(|(_, a)| *a));
+                }
+                _ => {
+                    roots.insert(r);
+                }
+            }
+        }
+        roots
     }
 
     fn lower_expr(&mut self, expr: &Expr, target: Option<RegId>) -> Result<(RegId, StaticType), LowerError> {
@@ -668,6 +818,11 @@ impl<'a> IrLowerer<'a> {
                     flags,
                     is_record: true,
                 });
+                // Birth register of this record site — the do-exit free
+                // path frees through it when the ctor dominates the exit.
+                if let Some(&site) = self.shape.sites.get(&(expr as *const Expr)) {
+                    self.site_regs.insert(site, (reg, self.ctrl_depth));
+                }
                 for (i, v_reg) in elem_regs.into_iter().enumerate() {
                     let i_reg = self.next_reg();
                     self.emit(Instruction::LoadInt {
@@ -731,6 +886,11 @@ impl<'a> IrLowerer<'a> {
                     flags,
                     is_record: false,
                 });
+                // Birth register of this table site — the do-exit free
+                // path frees through it when the ctor dominates the exit.
+                if let Some(&site) = self.shape.sites.get(&(expr as *const Expr)) {
+                    self.site_regs.insert(site, (reg, self.ctrl_depth));
+                }
                 for (i, v_reg) in elem_regs.into_iter().enumerate() {
                     let i_reg = self.next_reg();
                     self.emit(Instruction::LoadInt {
@@ -809,7 +969,9 @@ impl<'a> IrLowerer<'a> {
                 };
 
                 self.current_block = value_block;
+                self.ctrl_depth += 1;
                 let (v_reg, _) = self.lower_expr(right, None)?;
+                self.ctrl_depth -= 1;
                 let value_end = self.current_block;
                 self.terminate(Terminator::Jump(join_block));
 

@@ -19,7 +19,8 @@ local persistent = {} -- We satisfy the compiler with a fallback heap allocation
 local i = 0
 
 while i < 3 do
-    local temp = {i}
+    local temp = {}
+    temp[0] = i
     -- `persistent` safely unions its alias with `temp` on every iteration.
     persistent = temp
     i = i + 1
@@ -42,7 +43,9 @@ local ghost -- Implicitly assigned NULL_ROOT alias
 -- 4. MEMORY COMPOSTING & ALIAS LIFE-SAVER
 print("Phase 4: Lexical Composting & `nil` Verbs")
 do
-    local scoped_data = {777, 888}
+    local scoped_data = {}
+    scoped_data[0] = 777
+    scoped_data[1] = 888
     print("Scoped data is valid here:")
     print(scoped_data[0])
     -- The lowerer tracks outer keys. At this lexical boundary, it intercepts
@@ -52,7 +55,9 @@ end
 
 -- In standard Lua, `nil` is a data type.
 -- In GLM, `nil` is NOT a value. It is a memory-release VERB.
-local original = {100, 200}
+local original = {}
+original[0] = 100
+original[1] = 200
 local alias = original
 
 -- The Contradiction: If `nil` executes a deterministic C `free()`,

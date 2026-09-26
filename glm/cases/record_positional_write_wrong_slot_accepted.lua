@@ -1,10 +1,12 @@
--- EXPECT: init
--- BASELINE: wrong-but-current (BS-5, unfixed). p[1] = "s" stores a
--- Str into the x:Int slot: check_index_base checks EVERY record
--- index against field 0's type (name:Str), so the write compiles.
--- Reading that slot back is unpinnable pointer disclosure
--- (inttoptr of the string pointer printed as Int; ASLR varies) —
--- reproducer in docs/records_and_memory.md BS-5.
+-- glm/cases/record_positional_write_wrong_slot_accepted.lua
+-- (former BS-5 bug pin) a String write into the x:Int slot compiled and stored a pointer into an i64 slot.
+--
+-- CONSTRUCTOR CUT: the record syntax this case exercised is rejected
+-- at parse until the Lua-style constructor redesign lands. The case
+-- stays as a guard — the the unsound direction must not come back unguarded with the redesign.
+-- EXPECT_BUILD_FAIL: Syntax Error: populated constructors are not supported
+do
 local p = { x: 10, name: "init" }
 p[1] = "s"
-print(p[0])
+print(p[1])
+end

@@ -28,6 +28,11 @@
 2   DO_EXIT_FREE_SITE      analyzer  do-exit free granted: heap site solely owned by the dying scope, freed once
 3   DO_EXIT_FREE_SHARED    analyzer  do-exit free deduplicated: site held by several dying bindings, one TableFree total
 4   DO_EXIT_ALIAS_SURVIVES analyzer  do-exit refused: block-local aliases a heap site owned outside the block (was silent UAF, now a loud rejection)
+5   DO_EXIT_FREE_DEFREG   lowerer   do-exit free emitted through the site's TableNew defining register (ctor dominates the exit; header never moves, so the birth register always holds it)
+6   DO_EXIT_FREE_PHI      lowerer   do-exit free emitted through a carrier name's join register (conditional ctor in an if-arm/loop body; the phi holds the header or null, both free-safe)
+7   DO_EXIT_JOIN_LEAK     lowerer   do-exit free refused at emission: the only sound register (a join phi) may alias a defining register freed at the same exit — bounded leak chosen over double free
+8   DO_EXIT_FREE_DROPPED  analyzer  do-exit free skipped: an explicit nil-drop inside the block already composted the site (loop merges resurrect the alias, the header is dead at runtime)
+9   DROP_STALE_SITE       analyzer  nil-drop refused: sole ownership proved, but the site was already composted by an earlier drop — freeing again would double-free a dead header
 
 10  BIND_SCALAR            analyzer  scalar binding
 11  BIND_HEAP              analyzer  heap binding

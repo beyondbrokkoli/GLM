@@ -18,7 +18,9 @@
 -- Block A: heterogeneous table — the conflict is ledgered at elem
 -- resolution, but the WALK completed, so the plate localizes it here.
 do
-  local bad = {1, "mismatch"}
+  local bad = {}
+  bad[0] = 1
+  bad[1] = "mismatch"
   print(bad[0])
 end
 

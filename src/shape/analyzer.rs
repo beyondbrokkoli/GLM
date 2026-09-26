@@ -47,7 +47,13 @@ struct Analyzer {
     conv_fires: BTreeSet<u8>,
     /// Do-exit ownership decisions per `Stmt::Do` node (consumed by the
     /// lowerer; see ShapeFacts::do_exit_frees).
-    do_exit_frees: BTreeMap<*const Stmt, Vec<String>>,
+    do_exit_frees: BTreeMap<*const Stmt, Vec<super::facts::DoExitFree>>,
+    /// Sites already composted at runtime by a successful sole-ownership
+    /// nil-drop (recording walk only). Loop merges resurrect dead sites
+    /// in alias sets — entry snapshots predate the drop — so every later
+    /// free decision (do-exit, another drop) must refuse them: the
+    /// header is gone and re-freeing it reads freed memory.
+    freed_sites: BTreeSet<usize>,
 }
 
 pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
@@ -70,6 +76,7 @@ pub fn analyze(ctx: &AnalysisContext<'_>) -> ShapeFacts {
         conflict_reported: BTreeSet::new(),
         conv_fires: BTreeSet::new(),
         do_exit_frees: BTreeMap::new(),
+        freed_sites: BTreeSet::new(),
     };
 
     let mut prev_end: Vec<BTreeMap<String, TableShape>> = Vec::new();
@@ -807,13 +814,15 @@ impl Analyzer {
     /// analysis `drop_reference` runs for explicit `t = nil`. A heap
     /// site may be freed at block exit iff it appears in no binding
     /// that survives the block; every dying binding that holds it
-    /// shares ONE TableFree (the lowerer frees per site, not per
-    /// name). A site held by a surviving binding used to be freed
-    /// through the block-local anyway — an early free leaving the
-    /// surviving name dangling (silent UAF); it is now a loud,
-    /// localized compile-time rejection. Runs only on the recording
-    /// walk: the fixpoint's scope state is intermediate and its
-    /// probes never see errors (same gate as check_table_use).
+    /// shares ONE free (handed to the lowerer as one `DoExitFree` per
+    /// site, with the first dying carrier named — never one per name:
+    /// a join binding is one runtime register). A site held by a
+    /// surviving binding used to be freed through the block-local
+    /// anyway — an early free leaving the surviving name dangling
+    /// (silent UAF); it is now a loud, localized compile-time
+    /// rejection. Runs only on the recording walk: the fixpoint's
+    /// scope state is intermediate and its probes never see errors
+    /// (same gate as check_table_use).
     fn decide_do_exit(&mut self, stmt: &Stmt) -> Result<(), ShapeError> {
         if !self.recording {
             return Ok(());
@@ -828,7 +837,7 @@ impl Analyzer {
             .collect();
 
         let mut seen_sites: BTreeSet<usize> = BTreeSet::new();
-        let mut free_names: Vec<String> = Vec::new();
+        let mut frees: Vec<super::facts::DoExitFree> = Vec::new();
         for (name, shape) in &dying {
             let roots: Vec<usize> = shape
                 .aliases
@@ -849,15 +858,27 @@ impl Analyzer {
                          the block — block-exit frees are rejected at compile time"
                     )));
                 }
+                if self.freed_sites.contains(&site) {
+                    // A nil-drop inside the block already composted this
+                    // site at runtime; the loop merge resurrected its
+                    // alias, but freeing again would re-free a dead
+                    // header. Skip — nothing is leaked, the memory is
+                    // already composted.
+                    signal!(self.recording, trace::TRACE_DO_EXIT_FREE_DROPPED);
+                    continue;
+                }
                 if !seen_sites.insert(site) {
                     signal!(self.recording, trace::TRACE_DO_EXIT_FREE_SHARED);
                 } else {
                     signal!(self.recording, trace::TRACE_DO_EXIT_FREE_SITE);
-                    free_names.push(name.clone());
+                    frees.push(super::facts::DoExitFree {
+                        site,
+                        carrier: name.clone(),
+                    });
                 }
             }
         }
-        self.do_exit_frees.insert(stmt as *const Stmt, free_names);
+        self.do_exit_frees.insert(stmt as *const Stmt, frees);
         Ok(())
     }
 
@@ -877,8 +898,18 @@ impl Analyzer {
             })
         });
         if !roots.is_empty() && sole && self.recording {
-            self.free_sites.insert(stmt as *const Stmt);
-            signal!(self.recording, trace::TRACE_SHAPE_DROP);
+            if roots.iter().any(|r| self.freed_sites.contains(r)) {
+                // Sole ownership proved, but the header is already
+                // composted — an earlier drop freed it and a loop merge
+                // resurrected the alias. Emitting the free would
+                // double-free a dead header; refusing leaks nothing
+                // (the memory is already gone).
+                signal!(self.recording, trace::TRACE_DROP_STALE_SITE);
+            } else {
+                self.free_sites.insert(stmt as *const Stmt);
+                self.freed_sites.extend(roots.iter().copied());
+                signal!(self.recording, trace::TRACE_SHAPE_DROP);
+            }
         } else if !roots.is_empty() && !sole && self.recording {
             signal!(self.recording, trace::TRACE_FAIL_ALIAS_UNION);
         }

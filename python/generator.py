@@ -1258,15 +1258,22 @@ class GlmLuaGenerator:
         return [stmt]
 
     def gen_inline_matrix(self):
-        """Generates inline anonymous 2D tables with safe Lua dimensions."""
+        """Generates store-built 2D tables (constructor cut: populated
+        literals are rejected at parse, so rows are fresh {} tables
+        stored into the outer spine — 0-based in glm AND system lua)."""
         v = self.fresh()
         rows, cols = self.r.randint(2, 4), self.r.randint(2, 4)
-        inner_type = ("table", "int")
-        table_ast = ("table_lit", inner_type, [
-            ("table_lit", "int", [("lit", self.r.randint(0, 10)) for _ in range(cols)])
-            for _ in range(rows)
-        ])
-        self.emit_exec(("local", v, table_ast))
+        self.emit_exec(("local", v, ("new",)))
+        for r in range(rows):
+            row = self.fresh()
+            self.emit_exec(("local", row, ("new",)))
+            for c in range(cols):
+                self.emit_exec(("store", row, ("lit", c), ("lit", self.r.randint(0, 10))))
+            self.emit_exec(("store", v, ("lit", r), ("var", row)))
+        # Keep the model's elem honest (the old table_lit allocated with
+        # this elem): emit_sinks only prints scalar-elem tables, and a
+        # table-holding spine must not leak TableHeap cells into prints.
+        self.m.get_var_binding(v).elem = ("table", "int")
         return v, rows, cols
 
     def gen_matrix_loop(self):
@@ -1274,18 +1281,17 @@ class GlmLuaGenerator:
         t, rows, cols = self.gen_inline_matrix()
         i, j = self.fresh(), self.fresh()
 
-        # Start at 1 to align with Lua table_lit initialization bounds!
-        self.emit_exec(("local", i, ("lit", 1)))
+        self.emit_exec(("local", i, ("lit", 0)))
         snap = self.m.snapshot()
 
-        cond_outer = ("bin", "<=", ("var", i), ("lit", rows))
+        cond_outer = ("bin", "<", ("var", i), ("lit", rows))
         self.emit(f"while {render(cond_outer)} do")
         self.ind += 1
 
-        decl_j = ("local", j, ("lit", 1))
+        decl_j = ("local", j, ("lit", 0))
         self.emit_exec(decl_j)
 
-        cond_inner = ("bin", "<=", ("var", j), ("lit", cols))
+        cond_inner = ("bin", "<", ("var", j), ("lit", cols))
         self.emit(f"while {render(cond_inner)} do")
         self.ind += 1
 

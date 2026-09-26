@@ -3,25 +3,27 @@
 -- decision, the '#t' span baseline, pointer identity. Each case below
 -- is a former standalone positive case, isolated in its own do-block;
 -- the EXPECT pins concatenate in file order. int_tables.lua and
--- first_touch.lua stay standalone top-level: their trailing if-join
--- over a fresh '{}' aborts under do-block isolation (pinned in
--- do_exit_alias_join_double_free.lua).
+-- first_touch.lua stay standalone top-level by design (their trailing
+-- if-join over a fresh '{}' was the do-exit double-free residual; the
+-- do-isolated copy is pinned green in do_exit_alias_join_double_free).
 
 -- float_tables.lua: Pillar 6: float tables — monomorphic arrays of
--- Pillar 2. '{e1, e2}' takes its element type from the first element
--- (all must agree, no coercion); '{}' stays the empty int table. The
--- array story is the int tables' story: a store past the span grows it
--- (doubling watermark, zero-filled — a float table's zero is 0.0,
--- printed as '0'), '#t' reports the span, 'u = t' aliases, and
--- 't = nil' is the same compile-time refcounted release (an unhook
--- while 'u' lives).
+-- Pillar 2. The element type is decided by first touch (constructor
+-- cut: populated literals are rejected at parse); '{}' stays the empty
+-- int table until a Float store retypes it. The array story is the int
+-- tables' story: a store past the span grows it (doubling watermark,
+-- zero-filled — a float table's zero is 0.0, printed as '0'), '#t'
+-- reports the span, 'u = t' aliases, and 't = nil' is the same
+-- compile-time refcounted release (an unhook while 'u' lives).
 -- EXPECT: 8	1.5	2.5	0
 -- EXPECT: 16	0	7.25
 -- EXPECT: 32	1.125	2.5
 -- EXPECT: 3.5	5.5	0.5	32
 -- EXPECT: 3.5
 do
-local t = {1.5, 2.5}
+local t = {}
+t[0] = 1.5
+t[1] = 2.5
 print(#t, t[0], t[1], t[2])
 
 t[10] = 7.25
@@ -46,12 +48,14 @@ end
 
 -- float_table_bool_elem.lua: Pillar 7: bool tables — byte-packed cells
 -- (the pillars charter; bitpacking would force read-modify-write
--- stores). '{true, false}' is the typed constructor; the growth zero
--- reads 'false'.
+-- stores). First touch with Bool stores types the table; the growth
+-- zero reads 'false'.
 -- EXPECT: true	false	false	8
 -- EXPECT: false	true
 do
-local t = {true, false}
+local t = {}
+t[0] = true
+t[1] = false
 print(t[0], t[1], t[2], #t)
 local i = 0
 while i < 5 do
@@ -124,10 +128,18 @@ end
 -- EXPECT: 10
 -- EXPECT: 2
 do
-local t = {1, 2, 3}
+local t = {}
+t[0] = 1
+t[1] = 2
+t[2] = 3
 print(t[0])
 do
-  local big = {10, 20, 30, 40, 50}
+  local big = {}
+  big[0] = 10
+  big[1] = 20
+  big[2] = 30
+  big[3] = 40
+  big[4] = 50
   print(big[0])
 end
 print(t[1])

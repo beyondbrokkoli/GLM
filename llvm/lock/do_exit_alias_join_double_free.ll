@@ -17,16 +17,28 @@ entry:
 b0:
   %v0 = call ptr @glm_tbl_new(i64 8, i8 0)
   %v2 = add i64 0, 0
-  %v3 = add i64 0, 1
+  %v3 = add i64 0, 5
   store i64 %v3, ptr %ts0.valp
   call void @glm_tbl_set(ptr %v0, i64 %v2, ptr %ts0.valp)
-  %v4 = getelementptr i8, ptr %v0, i64 0
-  %v6 = call i64 @sys_alloc_count()
-  call void @glm_print_int(i64 %v6)
-  call void @glm_print_nl()
+  %v4 = call ptr @glm_tbl_new(i64 8, i8 0)
+  %v6 = add i64 0, 1
+  %v7 = add i64 0, 2
+  %v5 = icmp slt i64 %v7, %v6
+  br i1 %v5, label %b1, label %b2
+
+b1:
+  %v8 = getelementptr i8, ptr %v0, i64 0
+  br label %b3
+
+b2:
+  br label %b3
+
+b3:
+  %v9 = phi ptr [ %v8, %b1 ], [ %v4, %b2 ]
+  call void @glm_tbl_free(ptr %v4)
   call void @glm_tbl_free(ptr %v0)
-  %v8 = call i64 @sys_alloc_count()
-  call void @glm_print_int(i64 %v8)
+  %v11 = call i64 @sys_alloc_count()
+  call void @glm_print_int(i64 %v11)
   call void @glm_print_nl()
   ret i32 0
 }

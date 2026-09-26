@@ -3,18 +3,30 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ast::{Expr, Stmt, StaticType};
 use super::core::LayoutVerdict;
 
+/// One do-exit free handed from the analyzer to the lowerer: the dying
+/// heap site plus a carrier name (the first dying binding, deterministic
+/// BTreeMap order) that still holds it. The lowerer picks the register:
+/// the site's TableNew defining register when the ctor dominates the
+/// exit, otherwise the carrier's join register.
+#[derive(Clone)]
+pub struct DoExitFree {
+    pub site: usize,
+    pub carrier: String,
+}
+
 pub struct ShapeFacts {
     pub sites: BTreeMap<*const Expr, usize>,
     pub elems: Vec<StaticType>,
     #[allow(dead_code)]
     pub layouts: Vec<LayoutVerdict>,
     pub free_sites: BTreeSet<*const Stmt>,
-    /// Do-exit ownership decisions, keyed by the `Stmt::Do` node: for
-    /// each heap site proved solely owned by the dying block, ONE name
-    /// (deterministic BTreeMap order) whose register holds it. The
-    /// lowerer frees these and only these at block exit — the analyzer
-    /// owns the proof, the lowerer owns the emission.
-    pub do_exit_frees: BTreeMap<*const Stmt, Vec<String>>,
+    /// Do-exit ownership decisions, keyed by the `Stmt::Do` node: ONE
+    /// entry per heap site proved solely owned by the dying block,
+    /// however many dying names alias it. The analyzer owns the proof,
+    /// the lowerer owns the emission (per site, never per name — a
+    /// name whose binding is an if-join over several sites is ONE
+    /// runtime register and must not be freed once per site).
+    pub do_exit_frees: BTreeMap<*const Stmt, Vec<DoExitFree>>,
     pub name_dense: BTreeMap<(String, usize), bool>,
     pub substitutions: BTreeMap<usize, StaticType>,
     /// Localized shape errors from the ghost run: the walk completed and

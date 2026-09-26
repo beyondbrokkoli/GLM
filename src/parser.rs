@@ -370,68 +370,27 @@ impl<'a> Parser<'a> {
             Some(Token::False) => Ok(Expr::Boolean(false)),
             Some(Token::Nil) => Ok(Expr::Nil),
             Some(Token::LeftBrace) => {
-                let mut elems = Vec::new();
-                let mut fields: Vec<(String, Expr)> = Vec::new();
-                let mut is_record = false;
-
-                if let Some(Token::Identifier(_)) = self.tokens.peek() {
-                    let mut look_ahead = self.tokens.clone();
-                    if let Some(Token::Identifier(_)) = look_ahead.next()
-                        && let Some(Token::Colon) = look_ahead.next()
-                    {
-                        is_record = true;
-                    }
+                // [Constructor Cut] Only the empty literal `{}` parses.
+                // Populated constructors — `{e1, e2, ...}` tables and
+                // `{k: v, ...}` records — shipped half-designed with the
+                // record feature and are OFF until the Lua-style
+                // redesign (`[k] = v`, `k = v` entries) lands: build
+                // tables with stores (`local t = {}` then `t[i] = v`)
+                // instead. The rejection is a syntax error, so the whole
+                // file ghosts out here (GHOST_BAIL_PARSER) exactly like
+                // any other parse failure.
+                if !matches!(self.tokens.peek(), Some(Token::RightBrace)) {
+                    return Err(ParseError(
+                        "Syntax Error: populated constructors are not supported — use 'local t \
+                         = {}' and 't[i] = v' stores (constructor redesign pending)"
+                            .into(),
+                    ));
                 }
-
-                if is_record {
-                    if !matches!(self.tokens.peek(), Some(Token::RightBrace)) {
-                        loop {
-                            let key = match self.tokens.next() {
-                                Some(Token::Identifier(n)) => n.to_string(),
-                                _ => return Err(ParseError("Syntax Error: Expected field name in record".into())),
-                            };
-                            self.expect(Token::Colon)?;
-                            let val = self.parse_expr()?;
-                            fields.push((key, val));
-                            if matches!(self.tokens.peek(), Some(Token::Comma)) {
-                                self.tokens.next();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(Token::RightBrace)?;
-                    // [Canonicalization Strike] Sort fields alphabetically so
-                    // slot assignment is name-canonical: {x:1, name:"a"} and
-                    // {name:"a", x:1} produce identical positional layouts.
-                    // Stable sort keeps duplicate keys in insertion order.
-                    fields.sort_by(|a, b| a.0.cmp(&b.0));
-                    glm_rt::trace::compiler_trace_signal(glm_rt::trace::TRACE_PARSE_REC_CTOR);
-                    Ok(Expr::RecordCtor(fields))
-                } else {
-                    if !matches!(self.tokens.peek(), Some(Token::RightBrace)) {
-                        loop {
-                            elems.push(self.parse_expr()?);
-                            if matches!(self.tokens.peek(), Some(Token::Comma)) {
-                                self.tokens.next();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(Token::RightBrace)?;
-                    // Constructor census for the map: the empty literal is
-                    // the Pending/F9 root (it can never join a record site),
-                    // non-empty ones are ordinary table ctors.
-                    glm_rt::trace::compiler_trace_signal(
-                        if elems.is_empty() {
-                            glm_rt::trace::TRACE_PARSE_TBL_EMPTY
-                        } else {
-                            glm_rt::trace::TRACE_PARSE_TBL_CTOR
-                        },
-                    );
-                    Ok(Expr::TableCtor(elems))
-                }
+                self.tokens.next();
+                // Constructor census for the map: the empty literal is
+                // the Pending/F9 root (it can never join a record site).
+                glm_rt::trace::compiler_trace_signal(glm_rt::trace::TRACE_PARSE_TBL_EMPTY);
+                Ok(Expr::TableCtor(Vec::new()))
             }
             Some(Token::String(s)) => Ok(Expr::String(s.trim_matches('"').to_string())),
             Some(Token::Identifier(name)) => {

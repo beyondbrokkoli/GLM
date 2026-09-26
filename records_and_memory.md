@@ -1,5 +1,15 @@
 # Records and Memory — behavior map
 
+> **CONSTRUCTOR CUT (2026-09-26):** populated constructors — `{e1, e2}`
+> tables and `{k: v}` records — are REJECTED at parse ("Syntax Error:
+> populated constructors are not supported"); only `{}` parses. The
+> record machinery downstream (analyzer/checker/lowerer/backend arms,
+> signals 22, 74, 75, 78, 82, 83, 85–88) is parked, not removed, and
+> the record corpus cases are re-pinned as ctor-rejection guards. This
+> map describes that parked machinery — it is the baseline the
+> Lua-style constructor redesign (`[k] = v` / `k = v` entries) revives.
+> Everything below is as-verified BEFORE the cut unless noted.
+
 Verified against source (symbol citations below) and binary (probe
 runs). Citations are file + symbol; line numbers churn. Rejection
 texts are corpus-pinned verbatim (`Type Error:` / `Lifetime Error:`
@@ -12,7 +22,9 @@ model them — the holes (BS-5) are leaks in that strictness, not intent.
 is the one that compiles) · BS-6 records unprintable as whole values ·
 BS-8 duplicate keys become slots; `#t` is span capacity · BS-9 reads
 through null tables return uninitialized stack memory · BS-11 records
-stored into tables never free.
+stored into tables never free. — All of these are now unreachable
+behind the constructor cut (guarded by the record_* pins); they
+revive, or die for good, with the Lua-style constructor redesign.
 
 ## A. Leak counter semantics
 
@@ -41,17 +53,22 @@ only maybe reject at runtime).
 `Stmt::Do` block exit frees block-local heap values (tables and
 records), but the decision is owned by shape analysis
 (`Analyzer::decide_do_exit` → `ShapeFacts::do_exit_frees`): a heap
-site frees iff no surviving binding holds it, ONE `TableFree` per site
+site frees iff no surviving binding holds it, ONE free per site
 however many dying names alias it. A block-local aliasing a surviving
 binding's table is rejected at compile time (pinned
 `do_exit_alias_survives_rejected.lua`) — replacing the old silent
-early free that left the surviving name dangling. Residual edge: a
-dying block-local that is an if-join between a fresh `{}` and another
-table frees through the exit-time phi while the site dedup still
-counts the join inputs separately — the phi's current header is handed
-to `glm_tbl_free` twice (pinned `do_exit_alias_join_double_free.lua`;
-the same join is harmless at top level, which emits no scope-exit
-frees — so int_tables.lua and first_touch.lua must stay top-level). The deep-free flag
+early free that left the surviving name dangling. Emission (post
+join-fix, lowerer `Stmt::Do` arm): a site whose ctor dominates the
+exit frees through its TableNew BIRTH REGISTER (`DO_EXIT_FREE_DEFREG`
+— the header never moves, so the birth register holds it on every
+path); a conditional ctor (if-arm / loop body) frees through the
+carrier name's join register (`DO_EXIT_FREE_PHI`, null-safe) unless
+that phi may alias a birth register freed at the same exit — then the
+site leaks on some path instead (`DO_EXIT_JOIN_LEAK`, pinned
+`do_exit_join_hazard_leak.lua`). A site already composted by a
+nil-drop inside the block (loop merges resurrect its alias) is
+skipped (`DO_EXIT_FREE_DROPPED` / `DROP_STALE_SITE`, pinned
+`nil_free_stale_redrop.lua`). The deep-free flag
 (bit 7) covers children written as inline constructors only; an
 identifier-held child is owned by its own binding (flagging it would
 double-free). Never extend deep-free to `String` (interned `.rodata`,
